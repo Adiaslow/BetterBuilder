@@ -1,0 +1,46 @@
+diff --git a/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_macrocycles.in b/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_macrocycles.in
+index 3599abd37..35fdfb2ff 100644
+--- a/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_macrocycles.in
++++ b/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_macrocycles.in
+@@ -8,11 +8,15 @@
+  * format: [SMARTS, s1, V1, s2, V2, s3, V3, s4, V4, s5, V5, s6, V6]
+  */
+ const std::string torsionPreferencesMacrocycles =
++    //----- amide bond planarity added by divya 05/20/26
++    "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 130.9 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     // ----- experimental ring amide bond patterns
+-    "[C:1][C;r{9-}:2](=O)@;-[NX3H0;r:3][CX4H1:4] 1 0.0 -1 8.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+-    "[C:1][C;r{9-}:2](=O)@;-[NX3H1;r:3][CX4H1:4] 1 0.0 -1 8.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+-    "[C:1][C;r{9-}:2](=O)@;-[NX3H0;r:3][CX4H2:4] 1 0.0 -1 8.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
++    "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 130.9 1 0.0 1 0.0 1 0.0 1 0.0\n" //editing this from 1 0.0 -1 13.9 1 0.0 1 0.0 1 0.0 1 0.0\n"
++    "[C:1][C;r{9-}:2](=O)@;-[NX3H0;r:3][CX4H1:4] 1 0.0 -1 80.0 1 0.0 1 0.0 1 0.0 1 0.0\n" //editing from 1 0.0 -1 8.0 1 0.0 1 0.0 1 0.0 1 0.0\n
++    "[C:1][C;r{9-}:2](=O)@;-[NX3H1;r:3][CX4H1:4] 1 0.0 -1 80.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
++    "[C:1][C;r{9-}:2](=O)@;-[NX3H0;r:3][CX4H2:4] 1 0.0 -1 80.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     // ---------- adapted chain torsions for macrocycle rings
++    "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 130.9 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[C;r{9-}:2]@;-[O;r{9-}:3]~[CH0:4] -1 78.2 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[C;r{9-}:2]([N])@;-[O;r{9-}:3]~[C:4] -1 79.1 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[C;r{9-}:2]@;-[O;r{9-}:3]~[C:4] -1 100.0 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+@@ -143,7 +147,7 @@ const std::string torsionPreferencesMacrocycles =
+     "[O:1]=[C;r{9-}:2]([!$([NH1])])@;-[NX3H1;r:3]([H:4])[$(c([nX2H0])([nX2H0]))] 1 100.0 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O,S:1]=[C;r{9-}:2]([$([NX3H1]),$([NX3H2])])@;-[$([NX3](cn));r:3][H:4] 1 0.0 -1 50.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[C;r{9-}:2]@;-[NX3H0;r:3]([a:4])[A] 1 0.0 -1 4.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+-    "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 13.9 1 0.0 1 0.0 1 0.0 1 0.0\n"
++    "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 130.9 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[CX3;r{9-}:2]@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 8.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     "[O:1]=[CX3;r{9-}:2]@;-[NX3H1;r:3][!#1:4] -1 100.0 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+     // end of modifications
+diff --git a/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_v2.in b/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_v2.in
+index 87db85b3f..22f3e2c98 100644
+--- a/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_v2.in
++++ b/Code/GraphMol/ForceFieldHelpers/CrystalFF/torsionPreferences_v2.in
+@@ -7,7 +7,8 @@
+  *
+  * format: [SMARTS, s1, V1, s2, V2, s3, V3, s4, V4, s5, V5, s6, V6]
+  */
+-const std::string torsionPreferencesV2 = 
++const std::string torsionPreferencesV2 =
++        "[O:1]=[CX3;r{9-}:2](a)@;-[NX3H0;r:3][!#1:4] 1 0.0 -1 130.9 1 0.0 1 0.0 1 0.0 1 0.0\n" 
+ 	"[O:1]=[C:2]!@;-[O:3]~[CH0:4] -1 78.2 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+ 	"[O:1]=[C:2]([N])!@;-[O:3]~[C:4] -1 79.1 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"
+ 	"[O:1]=[C:2]!@;-[O:3]~[C:4] -1 100.0 1 0.0 1 0.0 1 0.0 1 0.0 1 0.0\n"

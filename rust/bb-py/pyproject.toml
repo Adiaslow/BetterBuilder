@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "betterbuilder"
+description = "Fast, faithful macrocycle conformer generation (Rust backend)."
+requires-python = ">=3.10"
+version = "0.1.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+[tool.maturin]
+# Pure-Rust module (no Python source): the #[pymodule] `betterbuilder` IS the package. abi3 wheel.
+features = ["pyo3/extension-module"]

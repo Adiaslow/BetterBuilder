@@ -1,0 +1,354 @@
+//! ETKDG acceptance checks (RDKit `Embedder.cpp`): after Stage C, a conformer is accepted only if
+//! it passes tetrahedral, chiral, planarity, and (final) chiral-bounds/center-in-volume tests; a
+//! failing conformer is regenerated (the retry loop in `embed_one`). This is what keeps bad-chirality
+//! / degenerate geometries out of the ensemble. Double-bond linear/stereo checks are added once the
+//! spec carries double-bond data.
+
+use bb_core::{ChiralSet, MoleculeSpec};
+
+use crate::forcefield::improper_energy_grad;
+
+const MIN_TETRAHEDRAL_CHIRAL_VOL: f64 = 0.50;
+const TETRAHEDRAL_CENTERINVOLUME_TOL: f64 = 0.30;
+const PLANARITY_TOL: f64 = 0.7;
+
+#[inline]
+fn pt(c: &[f64], i: u32) -> [f64; 3] {
+    let i = i as usize;
+    [c[3 * i], c[3 * i + 1], c[3 * i + 2]]
+}
+#[inline]
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+#[inline]
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+#[inline]
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+#[inline]
+fn normalize(a: [f64; 3]) -> [f64; 3] {
+    let n = dot(a, a).sqrt();
+    if n > 1e-12 {
+        [a[0] / n, a[1] / n, a[2] / n]
+    } else {
+        a
+    }
+}
+
+/// Signed chiral volume of the four substituents (RDKit `calcChiralVolume`).
+fn chiral_volume(c: &[f64], i1: u32, i2: u32, i3: u32, i4: u32) -> f64 {
+    let v1 = sub(pt(c, i1), pt(c, i4));
+    let v2 = sub(pt(c, i2), pt(c, i4));
+    let v3 = sub(pt(c, i3), pt(c, i4));
+    dot(v1, cross(v2, v3))
+}
+
+#[inline]
+fn opposite_sign(a: f64, b: f64) -> bool {
+    a.is_sign_negative() != b.is_sign_negative()
+}
+
+/// `checkChiralCenters`: the signed volume must have the right sign and not collapse below 0.8× the bound.
+pub fn check_chiral_centers(spec: &MoleculeSpec, c: &[f64]) -> bool {
+    for cs in &spec.chiral_sets {
+        let vol = chiral_volume(c, cs.atoms[0], cs.atoms[1], cs.atoms[2], cs.atoms[3]);
+        let (lb, ub) = (cs.vol_lo as f64, cs.vol_hi as f64);
+        if (lb > 0.0 && vol < lb && (vol / lb < 0.8 || opposite_sign(vol, lb)))
+            || (ub < 0.0 && vol > ub && (vol / ub < 0.8 || opposite_sign(vol, ub)))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// `_volumeTest`: the four normalized substituent directions must span a non-degenerate tetrahedron.
+fn volume_test(cs: &ChiralSet, c: &[f64]) -> bool {
+    let p0 = pt(c, cs.center);
+    let v1 = normalize(sub(p0, pt(c, cs.atoms[0])));
+    let v2 = normalize(sub(p0, pt(c, cs.atoms[1])));
+    let v3 = normalize(sub(p0, pt(c, cs.atoms[2])));
+    let v4 = normalize(sub(p0, pt(c, cs.atoms[3])));
+    let min_vol = if cs.fused_small_rings { 0.25 } else { 1.0 } * MIN_TETRAHEDRAL_CHIRAL_VOL;
+    dot(cross(v1, v2), v3).abs() >= min_vol
+        && dot(cross(v1, v2), v4).abs() >= min_vol
+        && dot(cross(v1, v3), v4).abs() >= min_vol
+        && dot(cross(v2, v3), v4).abs() >= min_vol
+}
+
+/// `_sameSide`: is `p0` on the same side of the plane (v1,v2,v3) as v4?
+fn same_side(
+    v1: [f64; 3],
+    v2: [f64; 3],
+    v3: [f64; 3],
+    v4: [f64; 3],
+    p0: [f64; 3],
+    tol: f64,
+) -> bool {
+    let normal = cross(sub(v2, v1), sub(v3, v1));
+    let d1 = dot(normal, sub(v4, v1));
+    let d2 = dot(normal, sub(p0, v1));
+    if d1.abs() < tol || d2.abs() < tol {
+        return false;
+    }
+    !((d1 < 0.0) ^ (d2 < 0.0))
+}
+
+/// `_centerInVolume`: the center must sit inside the tetrahedron of its four substituents. Three-
+/// coordinate centers (encoded as `atoms[3] == center`) always pass.
+fn center_in_volume(cs: &ChiralSet, c: &[f64], tol: f64) -> bool {
+    if cs.center == cs.atoms[3] {
+        return true;
+    }
+    let p0 = pt(c, cs.center);
+    let (p1, p2, p3, p4) = (
+        pt(c, cs.atoms[0]),
+        pt(c, cs.atoms[1]),
+        pt(c, cs.atoms[2]),
+        pt(c, cs.atoms[3]),
+    );
+    same_side(p1, p2, p3, p4, p0, tol)
+        && same_side(p2, p3, p4, p1, p0, tol)
+        && same_side(p3, p4, p1, p2, p0, tol)
+        && same_side(p4, p1, p2, p3, p0, tol)
+}
+
+/// `checkTetrahedralCenters`: untagged deg-4 C/N centers must be non-planar and enclose their center.
+/// RDKit's `findChiralSets` never creates a tetrahedral set for a coordMap-pinned atom, so we skip any
+/// whose center is pinned (`pinned` empty = no coordMap = check all).
+pub fn check_tetrahedral_centers(
+    spec: &MoleculeSpec,
+    c: &[f64],
+    pinned: &[Option<[f64; 3]>],
+) -> bool {
+    spec.tetrahedral_centers.iter().all(|ts| {
+        let center = ts.center as usize;
+        if center < pinned.len() && pinned[center].is_some() {
+            return true; // pinned center: RDKit skips this tetrahedral set
+        }
+        volume_test(ts, c) && center_in_volume(ts, c, TETRAHEDRAL_CENTERINVOLUME_TOL)
+    })
+}
+
+/// Planarity check (`construct3DImproperForceField` energy < nCenters × 0.7). `spec.impropers` has 3
+/// contribs per sp2 center, so nCenters = len/3.
+pub fn planarity_ok(spec: &MoleculeSpec, c: &[f64]) -> bool {
+    if spec.impropers.is_empty() {
+        return true;
+    }
+    let n_centers = (spec.impropers.len() / 3).max(1);
+    improper_energy_grad(spec, c, 3).0 <= n_centers as f64 * PLANARITY_TOL
+}
+
+/// `_boundsFulfilled`: every pair distance among `atoms` within the bounds (10% of ub slack).
+fn bounds_fulfilled(spec: &MoleculeSpec, c: &[f64], atoms: &[u32]) -> bool {
+    for i in 0..atoms.len() {
+        for j in (i + 1)..atoms.len() {
+            let (a1, a2) = (atoms[i], atoms[j]);
+            let d = {
+                let v = sub(pt(c, a1), pt(c, a2));
+                dot(v, v).sqrt()
+            };
+            let (lb, ub) = (
+                spec.lb(a1 as usize, a2 as usize) as f64,
+                spec.ub(a1 as usize, a2 as usize) as f64,
+            );
+            if (d < lb && (d - lb).abs() > 0.1 * ub) || (d > ub && (d - ub).abs() > 0.1 * ub) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `finalChiralChecks`: chiral volumes + a distance-matrix bounds test over chiral atoms +
+/// center-in-volume (tol 0.1).
+pub fn final_chiral_checks(spec: &MoleculeSpec, c: &[f64]) -> bool {
+    if !check_chiral_centers(spec, c) {
+        return false;
+    }
+    let mut atoms: Vec<u32> = Vec::new();
+    for cs in &spec.chiral_sets {
+        if cs.center != cs.atoms[3] {
+            atoms.push(cs.center);
+            atoms.extend_from_slice(&cs.atoms);
+        }
+    }
+    atoms.sort_unstable();
+    atoms.dedup();
+    if !atoms.is_empty() && !bounds_fulfilled(spec, c, &atoms) {
+        return false;
+    }
+    spec.chiral_sets
+        .iter()
+        .all(|cs| center_in_volume(cs, c, 0.1))
+}
+
+/// `doubleBondGeometryChecks`: no substituent may be collinear with its double bond (would make the
+/// sp2 center linear). Triple `(nbr, dbAtom, otherDbAtom)`.
+pub fn double_bond_geometry_ok(spec: &MoleculeSpec, c: &[f64]) -> bool {
+    const LINEAR_TOL: f64 = 1e-3;
+    for e in &spec.double_bond_ends {
+        let v1 = normalize(sub(pt(c, e[1]), pt(c, e[0])));
+        let v2 = normalize(sub(pt(c, e[1]), pt(c, e[2])));
+        if dot(v1, v2) + 1.0 < LINEAR_TOL {
+            return false;
+        }
+    }
+    true
+}
+
+/// Unsigned dihedral angle in `[0, π]`.
+fn dihedral(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3], p3: [f64; 3]) -> f64 {
+    let n1 = cross(sub(p1, p0), sub(p2, p1));
+    let n2 = cross(sub(p2, p1), sub(p3, p2));
+    let m = (dot(n1, n1) * dot(n2, n2)).sqrt();
+    if m < 1e-12 {
+        return 0.0;
+    }
+    (dot(n1, n2) / m).clamp(-1.0, 1.0).acos()
+}
+
+/// `doubleBondStereoChecks`: each stereo double bond's dihedral must be on the correct side of 90°
+/// (`(dihedral − π/2)·sign ≥ 0`; sign +1 = trans, −1 = cis). Catches wrong cis/trans, which the M6
+/// torsion (planar at both 0° and 180°) does not by itself resolve.
+pub fn double_bond_stereo_ok(spec: &MoleculeSpec, c: &[f64]) -> bool {
+    for s in &spec.stereo_double_bonds {
+        let d = dihedral(
+            pt(c, s.atoms[0]),
+            pt(c, s.atoms[1]),
+            pt(c, s.atoms[2]),
+            pt(c, s.atoms[3]),
+        );
+        if (d - std::f64::consts::FRAC_PI_2) * (s.sign as f64) < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// The full ETKDG acceptance test on a 3D conformer (`n_atoms*3`): tetrahedral, chiral, planarity,
+/// double-bond linear + stereo, and final chiral bounds/center-in-volume. `pinned` (empty or length
+/// `n_atoms`) marks coordMap-frozen atoms so pinned tetrahedral centers are skipped, as in RDKit.
+pub fn passes_checks(spec: &MoleculeSpec, c: &[f64], pinned: &[Option<[f64; 3]>]) -> bool {
+    check_tetrahedral_centers(spec, c, pinned)
+        && check_chiral_centers(spec, c)
+        && planarity_ok(spec, c)
+        && double_bond_geometry_ok(spec, c)
+        && final_chiral_checks(spec, c)
+        && double_bond_stereo_ok(spec, c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bb_core::StereoDoubleBond;
+
+    /// Four substituents at alternating cube corners (signed chiral volume +16), center at origin.
+    /// Flat `[n*3]` coords: atoms 0..4 = substituents, atom 4 = center.
+    fn tetra_coords() -> Vec<f64> {
+        vec![
+            1.0, 1.0, 1.0, // a0
+            1.0, -1.0, -1.0, // a1
+            -1.0, 1.0, -1.0, // a2
+            -1.0, -1.0, 1.0, // a3
+            0.0, 0.0, 0.0, // center
+        ]
+    }
+
+    fn chiral_set(vol_lo: f32, vol_hi: f32) -> ChiralSet {
+        ChiralSet {
+            center: 4,
+            atoms: [0, 1, 2, 3],
+            vol_lo,
+            vol_hi,
+            fused_small_rings: false,
+        }
+    }
+
+    // A check earns its place only if it REJECTS the invalid geometry it exists to catch.
+
+    #[test]
+    fn chiral_check_rejects_inverted_handedness() {
+        // Center expecting positive volume; our tetrahedron has +16, well inside [5, 100].
+        let spec = MoleculeSpec {
+            n_atoms: 5,
+            chiral_sets: vec![chiral_set(5.0, 100.0)],
+            ..Default::default()
+        };
+        assert!(
+            check_chiral_centers(&spec, &tetra_coords()),
+            "correct handedness must pass"
+        );
+
+        // Swap substituents a1<->a2 → mirror image → volume flips to -16 (wrong sign) → MUST reject.
+        let mut inverted = tetra_coords();
+        inverted.swap(3, 6);
+        inverted.swap(4, 7);
+        inverted.swap(5, 8);
+        assert!(
+            !check_chiral_centers(&spec, &inverted),
+            "inverted handedness (volume {} vs required +) must be rejected",
+            chiral_volume(&inverted, 0, 1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn tetrahedral_check_rejects_flattened_center() {
+        // A tetrahedral center (encoded as ChiralSet with vol 0,0).
+        let spec = MoleculeSpec {
+            n_atoms: 5,
+            tetrahedral_centers: vec![chiral_set(0.0, 0.0)],
+            ..Default::default()
+        };
+        assert!(
+            check_tetrahedral_centers(&spec, &tetra_coords(), &[]),
+            "non-degenerate center must pass"
+        );
+
+        // Collapse all four substituents into the z=0 plane → degenerate (volume test fails) → MUST reject.
+        let flat = vec![
+            1.0, 1.0, 0.0, 1.0, -1.0, 0.0, -1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        assert!(
+            !check_tetrahedral_centers(&spec, &flat, &[]),
+            "coplanar (degenerate) center must be rejected"
+        );
+    }
+
+    #[test]
+    fn stereo_double_bond_rejects_wrong_isomer() {
+        // A trans (E) double bond, sign +1: dihedral s0-b-e-s1 must land on the >90° side.
+        let sdb = StereoDoubleBond {
+            atoms: [0, 1, 2, 3],
+            sign: 1,
+        };
+        let spec = MoleculeSpec {
+            n_atoms: 4,
+            stereo_double_bonds: vec![sdb],
+            ..Default::default()
+        };
+
+        // trans geometry (s0 up, s1 down) → dihedral 180° → passes.
+        let trans = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, -1.0, 0.0];
+        assert!(
+            double_bond_stereo_ok(&spec, &trans),
+            "correct trans isomer must pass"
+        );
+
+        // cis geometry (s1 up) → dihedral 0° → wrong side for a trans bond → MUST reject.
+        let cis = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0];
+        assert!(
+            !double_bond_stereo_ok(&spec, &cis),
+            "cis geometry must be rejected for a trans double bond"
+        );
+    }
+}

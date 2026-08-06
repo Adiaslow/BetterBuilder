@@ -1,0 +1,30 @@
+# ── Rust ──────────────────────────────────────────────────────────────
+/rust/target/
+**/*.rs.bk
+
+# ── Archived (GPU implementation + one-off prototypes) — kept on disk, out of the repo ──
+/.archive/
+
+# ── External reference (RDKit oracle + DOCK pipeline) — external code, kept locally for
+#    regenerating fixtures / speed benchmarking / the output-gap work, but not part of the deliverable.
+/oracle/
+/oracle_local/
+/old_code/
+
+# ── Python (venvs, bytecode, packaging/build artifacts) ───────────────
+.venv/
+.venv-oracle/
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+*.so
+
+# ── Editor / OS cruft ─────────────────────────────────────────────────
+.DS_Store
+*.swp
+*~
+
+# NOTE: Cargo.lock IS tracked (this workspace ships binaries — reproducible builds).
+# NOTE: validation/reference/*.sdf ARE tracked (oracle reference ensembles the guard needs).

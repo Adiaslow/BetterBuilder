@@ -1,0 +1,17 @@
+[package]
+name = "bb-core"
+description = "Shared data contract: the MoleculeSpec that carries a molecule's distance-geometry problem (bounds, torsions, chiral sets) between the RDKit-backed setup (bb-rdkit) and the embedder (bb-embed)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

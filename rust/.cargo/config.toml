@@ -1,0 +1,9 @@
+# CPU-specific codegen for the force-field hot path (autovectorization + FMA). `native` targets the
+# CPU that BUILDS the binary — correct for HPC (build on the machine you run on) and local dev.
+#
+# PORTABILITY: a `native` binary may SIGILL on an older CPU. For a deploy that ships binaries to
+# different hardware, override with the deploy arch instead, e.g.:
+#   CARGO_BUILD_RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release   # AVX2 baseline
+# Guard-validated fidelity-neutral (FMA changes f64 rounding but median NN stays 1.260 exact).
+[build]
+rustflags = ["-C", "target-cpu=native"]
