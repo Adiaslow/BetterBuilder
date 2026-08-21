@@ -1,12 +1,9 @@
-//! bb-embed — CPU reimplementation of the ETKDG macrocycle embed (the BetterBuilder candidate).
+//! bb-embed — the ETKDG macrocycle embed engine.
 //!
-//! Consumes a [`bb_core::MoleculeSpec`] (from `bb-rdkit`'s FFI to the patched RDKit) and produces
-//! conformers by reimplementing ETKDG's staged distance-geometry minimization — the ~91% we
-//! optimize. Numerics are best-in-class crates (argmin optimizer, rand); no Python. Validated by
-//! ensemble RMSD vs the oracle (~2 Å bar), not by term parity.
-//!
-//! Status: first end-to-end path — random-box init → Stage-A minimize (distance + chiral + 4th-dim)
-//! → 3D projection. Stages B/C (torsions/impropers/constraints) + the two-stage core-pin recipe are next.
+//! Consumes a [`bb_core::MoleculeSpec`] and produces conformers by staged distance-geometry
+//! minimization: init → Stage A (4D) → Stage B (4th-dimension squeeze) → Stage C (3D) → acceptance
+//! checks with retry. Entry points: [`embed`] (independent conformers) and [`embed_recipe`] (the
+//! two-stage core-pin recipe).
 
 pub mod bounds;
 pub mod checks;
@@ -18,6 +15,10 @@ use bb_core::MoleculeSpec;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
+
+/// `firstMinimization`'s per-atom energy reject threshold (RDKit `MAX_MINIMIZED_E_PER_ATOM`): a
+/// Stage-A result with `calcEnergy()/nAtoms` at or above this is discarded and the conformer redrawn.
+const MAX_MINIMIZED_E_PER_ATOM: f64 = 0.05;
 
 /// A generated conformer: `n_atoms * 3` xyz, row-major.
 #[derive(Clone, Debug)]
@@ -45,16 +46,16 @@ pub enum InitMode {
     Random,
 }
 
-/// Generate one conformer (3D, `n_atoms*3`): 4D init (per `init_mode`) → **Stage A** (distance-
-/// violation + chiral + 4th-dim) → project to 3D → **Stage C** (M6 torsions + impropers + distance
-/// constraints).
+/// Generate one accepted conformer (3D, `n_atoms*3`): retry [`embed_attempt`] with fresh inits
+/// until it passes [`checks::passes_checks`]. The attempt budget is `(10 × n_atoms).clamp(1, 24)`.
+/// NOTE: RDKit's embedder uses `maxIterations = 10 * numAtoms` uncapped (`Embedder.cpp`), so for
+/// n ≥ 3 native gives up sooner. Whether the 24 cap matches Divya's actual yield (the oracle — she
+/// may set `maxIterations`) is a stochastic-layer question that can only be settled by the
+/// end-to-end ensemble/yield comparison vs Divya, not per-unit vs RDKit; it is intentionally left at
+/// the calibrated cap until that comparison is run. If none pass, the last attempt is returned.
 ///
-/// `pinned` is empty (free embed) or length `n_atoms`; `Some(xyz)` freezes that atom to `xyz`
-/// throughout (the candidate's coordMap/`fixedPoints` analog — used by the core-pin recipe).
-/// Generate one accepted conformer: retry [`embed_attempt`] with fresh inits until it passes the
-/// ETKDG acceptance checks ([`checks::passes_checks`]), matching RDKit's `embedPoints` retry loop.
-/// Capped (RDKit uses `10×nAtoms`; we cap tighter for wall-clock — checks almost always pass on the
-/// first try). If all attempts fail, the last is kept so the conformer count is preserved.
+/// `pinned` is empty (free embed) or length `n_atoms`; `Some(xyz)` holds that atom at `xyz`
+/// throughout.
 fn embed_one(
     spec: &MoleculeSpec,
     rng: &mut StdRng,
@@ -64,21 +65,32 @@ fn embed_one(
     let max_attempts = (10 * spec.n_atoms).clamp(1, 24);
     let mut last = Vec::new();
     for _ in 0..max_attempts {
-        last = embed_attempt(spec, rng, pinned, init_mode);
-        if checks::passes_checks(spec, &last, pinned) {
-            return last;
+        // `None` = a rejected attempt (init-level eigenvalue reject or the per-atom energy reject);
+        // RDKit re-draws a fresh distance matrix on either, which the next loop iteration does.
+        if let Some(c) = embed_attempt(spec, rng, pinned, init_mode) {
+            if checks::passes_checks(spec, &c, pinned) {
+                return c;
+            }
+            last = c;
         }
     }
+    // Budget exhausted with nothing accepted: return the last completed (unaccepted) attempt, or an
+    // empty conformer if every attempt was rejected (RDKit likewise yields no conformer here — the
+    // ensemble consumers skip a conformer whose length != n*3). The 24-cap vs RDKit's uncapped 10·n
+    // is a yield-calibration question for the Phase-3 ensemble comparison vs Divya.
     last
 }
 
-/// One embedding attempt (init → Stage A → Stage B → Stage C), no acceptance check.
+/// One embedding attempt (init → Stage A → Stage B → Stage C). Returns `None` on RDKit's embed-loop
+/// rejects: the `computeInitialCoords` eigenvalue reject (via [`init::metric_matrix`]) or the
+/// `firstMinimization` per-atom energy reject (`MAX_MINIMIZED_E_PER_ATOM = 0.05`) — either causes a
+/// fresh re-draw. `Some(3D coords)` for a completed attempt (still subject to `passes_checks`).
 fn embed_attempt(
     spec: &MoleculeSpec,
     rng: &mut StdRng,
     pinned: &[Option<[f64; 3]>],
     init_mode: InitMode,
-) -> Vec<f64> {
+) -> Option<Vec<f64>> {
     let n = spec.n_atoms;
     let fixed: Vec<bool> = if pinned.is_empty() {
         Vec::new()
@@ -91,9 +103,10 @@ fn embed_attempt(
         InitMode::Random => forcefield::BASIN_ALL,
     };
 
-    // Stage A init (4D), then pinned atoms placed at their frozen coords (4th dim 0).
+    // Stage A init (4D), then pinned atoms placed at their frozen coords (4th dim 0). The metric-matrix
+    // init can reject (degenerate distance matrix) — `?` propagates that as a re-draw.
     let mut a = match init_mode {
-        InitMode::MetricMatrix => init::metric_matrix(spec, 4, rng),
+        InitMode::MetricMatrix => init::metric_matrix(spec, 4, rng)?,
         InitMode::Random => init::random_box(n, 4, 10.0, rng),
     };
     for (atom, p) in pinned.iter().enumerate() {
@@ -105,6 +118,13 @@ fn embed_attempt(
         }
     }
     let a4 = minimize::minimize_stage_a(spec, a, 4, &fixed, basin, 400);
+
+    // firstMinimization per-atom energy reject: RDKit sets gotCoords=false (→ re-draw) when
+    // `calcEnergy()/nAtoms >= MAX_MINIMIZED_E_PER_ATOM (0.05)`. `stage_a_reject_energy` is RDKit's
+    // calcEnergy convention (machine-precision-gated), so the decision matches exactly.
+    if forcefield::stage_a_reject_energy(spec, &a4, 4, basin) >= MAX_MINIMIZED_E_PER_ATOM * n as f64 {
+        return None;
+    }
 
     // Stage B (4th-dim squeeze): RDKit runs `minimizeFourthDimension` when there are chiral centers
     // or we started from random coords (`chiralCenters>0 || useRandomCoords`).
@@ -124,11 +144,11 @@ fn embed_attempt(
 
     // Stage C: constraints from the projected geometry, then torsions + impropers + constraints in 3D.
     let (dist_c, angle_c) = forcefield::build_stage_c_constraints(spec, &c3);
-    minimize::minimize_stage_c(spec, &dist_c, &angle_c, c3, &fixed, 300)
+    Some(minimize::minimize_stage_c(spec, &dist_c, &angle_c, c3, &fixed, 300))
 }
 
-/// Embed `n_conf` independent conformers for `spec`, seeded by `seed` (no core-pinning). Uses the
-/// metric-matrix init, matching RDKit `EmbedMolecule`'s `useRandomCoords=False` default.
+/// Embed `n_conf` independent conformers for `spec` from a single RNG seeded by `seed`. No
+/// core-pinning; metric-matrix init.
 pub fn embed(spec: &MoleculeSpec, n_conf: usize, seed: u64) -> Vec<Conformer> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..n_conf)
@@ -138,20 +158,20 @@ pub fn embed(spec: &MoleculeSpec, n_conf: usize, seed: u64) -> Vec<Conformer> {
         .collect()
 }
 
-/// Deterministic per-conformer RNG seed, so every embed is independent (→ parallelizable) yet the
-/// whole run stays reproducible for a given `base_seed`.
+/// RNG seed for the conformer at core seed `j`, sidechain index `k`, derived from `base`.
 #[inline]
 fn mix_seed(base: u64, j: u64, k: u64) -> u64 {
     base ^ (j.wrapping_add(1)).wrapping_mul(0x9E3779B97F4A7C15)
         ^ (k.wrapping_add(1)).wrapping_mul(0xC2B2AE3D27D4EB4F)
 }
 
-/// The faithful **two-stage core-pin recipe** (`build_ligands.py`), **parallelized with rayon** —
-/// every conformer is independent, so the embed fans out across all cores. For each of `core_seeds`
-/// seeds `j`, embed one free conformer (metric-matrix init, RNG `base_seed + j`), freeze the recipe's
-/// `pin_atoms` to it + coordMap-tighten the bounds, then embed `sidechain_confs` conformers (random
-/// init, per-conformer RNG) around the frozen core. Total = `core_seeds × sidechain_confs`. Falls back
-/// to independent embeds if the spec carries no recipe data.
+/// The two-stage core-pin recipe. For each of `spec.core_seeds` seeds `j`: embed one free conformer
+/// (metric-matrix init, RNG seed `base_seed + j`), hold `spec.pin_atoms` at those coordinates and
+/// tighten the bounds from them ([`bounds::coord_map_bounds_f64`]), then embed `spec.sidechain_confs`
+/// conformers (random init, one RNG seed per conformer) around the held core. Returns
+/// `core_seeds × sidechain_confs` conformers, generated in parallel over rayon.
+///
+/// Falls back to 200 independent [`embed`] conformers when `core_seeds` or `sidechain_confs` is 0.
 pub fn embed_recipe(spec: &MoleculeSpec, base_seed: u64) -> Vec<Conformer> {
     if spec.core_seeds == 0 || spec.sidechain_confs == 0 {
         return embed(spec, 200, base_seed);
@@ -177,8 +197,12 @@ pub fn embed_recipe(spec: &MoleculeSpec, base_seed: u64) -> Vec<Conformer> {
                 let a = a as usize;
                 pinned[a] = Some([sc[a * 3], sc[a * 3 + 1], sc[a * 3 + 2]]);
             }
-            let mut sc_spec = spec.clone();
-            sc_spec.bounds = bounds::coord_map_bounds(&spec.bounds, n, &pinned);
+            // Tighten the RAW bounds (f64, matching RDKit's coordMap path which starts pre-smoothing)
+            // with the pinned distances; the sidechain embed reads bounds_f64 via ub64. Fall back to
+            // the smoothed bounds for pre-field specs. `with_seed_bounds` shares the topology and skips
+            // cloning the two raw-bounds matrices the sidechain embed never reads.
+            let base = if spec.raw_bounds_f64.is_empty() { &spec.bounds_f64 } else { &spec.raw_bounds_f64 };
+            let sc_spec = spec.with_seed_bounds(bounds::coord_map_bounds_f64(base, n, &pinned));
             (pinned, sc_spec)
         })
         .collect();

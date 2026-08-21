@@ -1,0 +1,54 @@
+// SMARTS as the experimental-torsion library uses it.
+//
+// This grammar is the specification we claim parity with. It covers exactly the primitives that
+// appear in RDKit's torsionPreferences_v2.in and _macrocycles.in — see the inventory in
+// validation/parity/README.md — and no more, so an unsupported construct is a parse error rather
+// than a silent misreading.
+//
+// Precedence follows the SMARTS standard: implicit/& binds tightest, then , then ; loosest.
+
+pattern     =  { SOI ~ atom ~ chain* ~ EOI }
+chain       =  { branch | ring_closure | (bond? ~ atom) }
+branch      =  { "(" ~ bond? ~ atom ~ chain* ~ ")" }
+ring_closure=  { bond? ~ ("%" ~ ASCII_DIGIT{2} | ASCII_DIGIT) }
+
+atom        =  { bracket_atom | organic_atom }
+organic_atom=  { "Cl" | "Br" | "B" | "C" | "N" | "O" | "S" | "P" | "F" | "I"
+               | "b" | "c" | "n" | "o" | "s" | "p" | "*" | "a" | "A" }
+bracket_atom=  { "[" ~ atom_expr ~ atom_map? ~ "]" }
+atom_map    =  { ":" ~ ASCII_DIGIT+ }
+
+// three precedence levels, loosest first
+atom_expr   =  { atom_or ~ (";" ~ atom_or)* }
+atom_or     =  { atom_and ~ ("," ~ atom_and)* }
+atom_and    =  { atom_not ~ ("&"? ~ atom_not)* }
+atom_not    =  { "!"? ~ atom_prim }
+
+atom_prim   =  { recursive | ring_size_range | hybridization | atomic_num
+               | total_h | connectivity | degree | valence | ring_count | ring_size
+               | ring_bond_count | charge | symbol }
+recursive   =  { "$(" ~ atom ~ chain* ~ ")" }
+atomic_num  =  { "#" ~ ASCII_DIGIT+ }
+total_h     =  { "H" ~ ASCII_DIGIT* }
+connectivity=  { "X" ~ ASCII_DIGIT+ }
+degree      =  { "D" ~ ASCII_DIGIT+ }
+valence     =  { "v" ~ ASCII_DIGIT+ }
+// `R` alone is ring membership; the lookahead keeps it from eating element symbols
+// that start with R, such as Rb.
+ring_count  =  { "R" ~ !ASCII_ALPHA_LOWER ~ ASCII_DIGIT* }
+// `r` alone is ring membership; `r<n>` is a ring of exactly that size
+ring_size   =  { "r" ~ ASCII_DIGIT* }
+// number of ring bonds at the atom
+ring_bond_count = { "x" ~ ASCII_DIGIT+ }
+// RDKit's macrocycle extension: a minimum ring size, e.g. r{9-}
+ring_size_range = { "r{" ~ ASCII_DIGIT+ ~ "-" ~ ASCII_DIGIT* ~ "}" }
+hybridization   = { "^" ~ ASCII_DIGIT }
+charge      =  { ("+" ~ ASCII_DIGIT*) | ("-" ~ ASCII_DIGIT*) }
+symbol      =  { "Cl" | "Br" | ASCII_ALPHA_UPPER ~ ASCII_ALPHA_LOWER? | ASCII_ALPHA_LOWER | "*" }
+
+// bonds carry the same three precedence levels
+bond        =  { bond_or ~ (";" ~ bond_or)* }
+bond_or     =  { bond_and ~ ("," ~ bond_and)* }
+bond_and    =  { bond_not ~ ("&"? ~ bond_not)* }
+bond_not    =  { "!"? ~ bond_prim }
+bond_prim   =  { "-" | "=" | "#" | "$" | ":" | "~" | "@" | "/" | "\\" }

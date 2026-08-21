@@ -1,0 +1,16 @@
+source      RDKit's topological distance matrix, MolOps::getDistanceMat(mol, useBO=false,
+            useAtomWts=false, force=false) — exactly the call setTopolBounds makes. Captured through
+            bb-rdkit's cxx bridge (bb-rdkit::topo_distance_matrix -> bb::topo_distance_matrix in
+            bridge.cc) on the post-AddHs molecule; the bridge copies the cached matrix RDKit returns.
+purpose     gate for the pure-Rust distance_matrix port (bb_bounds::dist). setLowerBoundVDW reads
+            this for the 1-5 (dist==4) and 1-6 (dist==5) van der Waals scaling, and set14 uses it.
+            The Rust port reproduces getDistanceMat's contract (off-diagonal init LOCAL_INF=1e8,
+            diagonal 0, unit bond weights, all-pairs shortest path); it computes the identical
+            shortest-path values via BFS since unit-weight shortest paths are algorithm-independent.
+format      gzipped JSONL, one object per corpus line:
+            {"name": <id>, "dist": [<n*n row-major f64; d[i*n+j] = shortest bond count, 0 on the
+            diagonal, 1e8 if disconnected>]}
+            A SMILES RDKit cannot parse is {"name": <id>, "error": "unparseable"}.
+corpus      first 600 of validation/seeds_5000.smi (same molecule set as raw_bounds_seeds600)
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

@@ -1,0 +1,16 @@
+source      RDKit's UFF atom typing, RDKit::UFF::Tools::getAtomLabel, called per atom through
+            bb-rdkit's cxx bridge (bb-rdkit::uff_atom_labels -> bb::uff_atom_labels in bridge.cc)
+            on the post-AddHs molecule. getAtomLabel is exported by RDKit; the bridge calls it and
+            copies the string, computing nothing itself.
+purpose     gate for the pure-Rust UFF atom-typing port (bb_perceive::uff::atom_label). That port
+            reproduces the full getAtomLabel + addAtomChargeFlags source (every element branch); this
+            fixture is the gate over real molecules, NOT the source of truth for which rules to
+            implement. The UFF parameter table is vendored verbatim in rdkit-patch/uff_params.txt
+            (dumped from ForceFields::UFF::defaultParamData via bb-rdkit::uff_param_table).
+format      JSONL, one object per corpus line:
+            {"name": <id>, "labels": [<UFF type string per atom, post-AddHs order>]}
+            A SMILES RDKit cannot parse is {"name": <id>, "error": "unparseable"} rather than
+            dropped, so the count matches the corpus.
+corpus      first 600 of validation/seeds_5000.smi (same molecule set as raw_bounds_seeds600)
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

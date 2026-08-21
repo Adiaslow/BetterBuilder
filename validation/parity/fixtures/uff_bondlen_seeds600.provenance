@@ -1,0 +1,16 @@
+source      RDKit's UFF bond rest lengths exactly as set12Bounds computes accumData.bondLengths:
+            per bond, ForceFields::UFF::Utils::calcBondRestLength(getBondTypeAsDouble, params[i],
+            params[j]) when both atoms have UFF params, else (getRvdw(i)+getRvdw(j))/2. Captured
+            through bb-rdkit's cxx bridge (bb-rdkit::uff_bond_rest_lengths -> bb::uff_bond_rest_lengths
+            in bridge.cc) on the post-AddHs molecule; the bridge calls RDKit's routines and copies.
+purpose     gate for the pure-Rust calc_bond_rest_length port (bb_perceive::uff). The port reproduces
+            the full BondStretch.cpp formula (Pauling rBO + O'Keeffe-Brese rEN); this fixture is the
+            gate over real molecules. Over this corpus every atom has UFF params, so the crude
+            fallback path is not exercised here — it is ported with set12/the Rvdw table, not deduced
+            from this corpus. Match is bit-exact (worst |delta| 0.0 over 50918 bonds).
+format      JSONL, one object per corpus line:
+            {"name": <id>, "bondlen": [<rest length per bond, post-AddHs bond order, full f64>]}
+            A SMILES RDKit cannot parse is {"name": <id>, "error": "unparseable"}.
+corpus      first 600 of validation/seeds_5000.smi (same molecule set as uff_labels_seeds600)
+indices     post-AddHs bond order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

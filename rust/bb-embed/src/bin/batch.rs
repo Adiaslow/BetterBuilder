@@ -1,5 +1,5 @@
-//! Batch throughput benchmark: read N MoleculeSpec JSONs, embed all (rayon over molecules), report
-//! conformers/second. This is the production pattern — the workload we'd fan out across cores.
+//! bb-batch — read N MoleculeSpec JSONs, embed all of them (rayon over molecules), and report
+//! elapsed time and conformers/second on stderr.
 //!
 //!   bb-batch <spec1.json> <spec2.json> ...        (RAYON_NUM_THREADS controls core count)
 

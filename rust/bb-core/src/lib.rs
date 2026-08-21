@@ -1,9 +1,11 @@
-//! bb-core — the `MoleculeSpec` contract: the distance-geometry problem for one molecule.
+//! bb-core — the `MoleculeSpec` data contract: the distance-geometry problem for one molecule.
 //!
-//! Produced from RDKit's perception (bounds matrix + experimental torsions + chirality) and
-//! consumed by the `bb-embed` CPU ETKDG minimizer (the BetterBuilder candidate). RDKit does all
-//! perception; this side is pure numeric geometry. Serde-serializable so setup (Python/RDKit) and
-//! the embed (Rust) exchange it as JSON.
+//! Produced by `bb-rdkit` setup and consumed by the `bb-embed` engine. Numeric arrays only;
+//! serde-serializable, so the two CLIs exchange it as JSON. [`smooth`] holds the triangle-inequality
+//! operation on the bounds matrix — the one primitive both the spec builder and the engine share.
+
+pub mod smooth;
+pub mod vec3;
 
 /// Signed chiral-volume constraint on four points. As an energy term (`vol_lo/vol_hi` non-zero) it
 /// penalises the signed volume `(p_i−p_l)·((p_j−p_l)×(p_k−p_l))` outside `[vol_lo, vol_hi]`. With
@@ -15,18 +17,18 @@ pub struct ChiralSet {
     pub center: u32,
     /// The four substituent points defining the signed volume.
     pub atoms: [u32; 4],
-    pub vol_lo: f32,
-    pub vol_hi: f32,
+    pub vol_lo: f64,
+    pub vol_hi: f64,
     /// Scales the tetrahedral volume check ×0.25.
     pub fused_small_rings: bool,
 }
 
 /// CrystalFF M6 experimental-torsion term: `E = Σ_{n=0..5} V[n]·(1 + signs[n]·cos((n+1)·φ))`.
-/// Atoms + coefficients come straight from RDKit `GetExperimentalTorsions`.
+/// Atoms and coefficients come from RDKit `GetExperimentalTorsions`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpTorsion {
     pub atoms: [u32; 4],
-    pub v: [f32; 6],
+    pub v: [f64; 6],
     pub signs: [i8; 6],
 }
 
@@ -36,10 +38,10 @@ pub struct ExpTorsion {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Improper {
     pub atoms: [u32; 4], // (i, j=center, k, l)
-    pub c0: f32,
-    pub c1: f32,
-    pub c2: f32,
-    pub fc: f32,
+    pub c0: f64,
+    pub c1: f64,
+    pub c2: f64,
+    pub fc: f64,
 }
 
 /// A 1-3 angle (i-j-k, `j` central) from RDKit's `collectBondsAndAngles`. `triple` marks a
@@ -68,7 +70,33 @@ pub struct MoleculeSpec {
     pub n_atoms: usize,
     /// 3 or 4. Embedding is 4D when `useRandomCoords || n_chiral > 0`.
     pub dim: u8,
+    /// Atomic number per atom, in the same order as every other index here (RDKit `SmilesToMol` +
+    /// `AddHs`). Empty in specs written before this field existed.
+    #[serde(default)]
+    pub atomic_numbers: Vec<u8>,
+    /// Net formal charge of the molecule.
+    #[serde(default)]
+    pub formal_charge: i32,
     pub bounds: Vec<f32>,
+    /// The smoothed bounds matrix in f64 — the precision RDKit's force field actually uses. The embed
+    /// reads these (via `ub64`/`lb64`) so its Stage-A/C distance and constraint terms match RDKit to
+    /// machine precision, not the ~1e-5 an f32 bound amplifies to near a tight constraint. `bounds`
+    /// stays f32 solely so the spec is byte-identical to the bridge for the spec gate. Empty in
+    /// pre-field specs / the bridge oracle spec (never embedded).
+    #[serde(default)]
+    pub bounds_f64: Vec<f64>,
+    /// The pre-smoothing `setTopolBounds` matrix (before triangle smoothing), `n*n` row-major.
+    /// The core-pin recipe tightens *this* with the pinned distances and re-smooths at tol 0.05 —
+    /// matching RDKit's `setupInitialBoundsMatrix` coordMap path, which also starts from the raw
+    /// bounds (the tol-0.05 infeasibility repair is order-dependent, so starting from the already-
+    /// smoothed `bounds` diverges). Empty in specs written before this field / for the free embed.
+    #[serde(default)]
+    pub raw_bounds: Vec<f32>,
+    /// The pre-smoothing bounds matrix in f64 — what the core-pin recipe tightens (via
+    /// `coord_map_bounds_f64`) so the sidechain bounds match RDKit's coordMap path to machine precision.
+    /// `raw_bounds` stays f32 for symmetry with `bounds`; empty when unused.
+    #[serde(default)]
+    pub raw_bounds_f64: Vec<f64>,
     /// Tagged centers → chiral energy term.
     pub chiral_sets: Vec<ChiralSet>,
     /// Untagged C/N degree-4 centers → tetrahedral non-degeneracy check only.
@@ -111,18 +139,71 @@ fn default_bounds_force_scaling() -> f32 {
 }
 
 impl MoleculeSpec {
-    /// Upper distance bound for pair (i, j).
+    /// Upper distance bound for pair (i, j). f32 storage, for the byte-identical spec gate.
     #[inline]
     pub fn ub(&self, i: usize, j: usize) -> f32 {
         let (lo, hi) = if i < j { (i, j) } else { (j, i) };
         self.bounds[lo * self.n_atoms + hi]
     }
 
-    /// Lower distance bound for pair (i, j).
+    /// Lower distance bound for pair (i, j). f32 storage, for the byte-identical spec gate.
     #[inline]
     pub fn lb(&self, i: usize, j: usize) -> f32 {
         let (lo, hi) = if i < j { (i, j) } else { (j, i) };
         self.bounds[hi * self.n_atoms + lo]
+    }
+
+    /// Upper bound in the f64 precision RDKit's force field uses. Falls back to the f32 matrix when
+    /// `bounds_f64` is absent (older specs / the bridge oracle spec, which is never embedded).
+    #[inline]
+    pub fn ub64(&self, i: usize, j: usize) -> f64 {
+        let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+        if self.bounds_f64.is_empty() {
+            self.bounds[lo * self.n_atoms + hi] as f64
+        } else {
+            self.bounds_f64[lo * self.n_atoms + hi]
+        }
+    }
+
+    /// Lower bound in f64 precision (see [`Self::ub64`]).
+    #[inline]
+    pub fn lb64(&self, i: usize, j: usize) -> f64 {
+        let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+        if self.bounds_f64.is_empty() {
+            self.bounds[hi * self.n_atoms + lo] as f64
+        } else {
+            self.bounds_f64[hi * self.n_atoms + lo]
+        }
+    }
+
+    /// A per-seed variant for the core-pin recipe: identical topology, distance bounds replaced by the
+    /// coordMap-tightened `bounds_f64` (with its f32 shadow, which the acceptance checks read via
+    /// [`Self::ub`]/[`Self::lb`]). The pre-smoothing `raw_bounds`/`raw_bounds_f64` are left empty — the
+    /// sidechain embed never reads them — so this avoids the two n² matrices `Clone` would copy per
+    /// seed only to discard. Full struct literal on purpose: a new field forces a decision here.
+    pub fn with_seed_bounds(&self, bounds_f64: Vec<f64>) -> MoleculeSpec {
+        MoleculeSpec {
+            bounds: bounds_f64.iter().map(|&x| x as f32).collect(),
+            bounds_f64,
+            raw_bounds: Vec::new(),
+            raw_bounds_f64: Vec::new(),
+            n_atoms: self.n_atoms,
+            dim: self.dim,
+            atomic_numbers: self.atomic_numbers.clone(),
+            formal_charge: self.formal_charge,
+            chiral_sets: self.chiral_sets.clone(),
+            tetrahedral_centers: self.tetrahedral_centers.clone(),
+            exp_torsions: self.exp_torsions.clone(),
+            impropers: self.impropers.clone(),
+            bonds: self.bonds.clone(),
+            angles: self.angles.clone(),
+            bounds_force_scaling: self.bounds_force_scaling,
+            pin_atoms: self.pin_atoms.clone(),
+            core_seeds: self.core_seeds,
+            sidechain_confs: self.sidechain_confs,
+            double_bond_ends: self.double_bond_ends.clone(),
+            stereo_double_bonds: self.stereo_double_bonds.clone(),
+        }
     }
 }
 

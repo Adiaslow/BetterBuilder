@@ -1,0 +1,22 @@
+source      RDKit's DGeomHelpers::setTopolBounds, called through bb-rdkit's cxx bridge
+            (bb-rdkit::raw_bounds -> bb::raw_bounds -> bb::compute_raw_bounds in bridge.cc). The
+            matrix is captured straight out of initBoundsMat + setTopolBounds, BEFORE
+            triangleSmoothBounds — the raw constructor output, which the production bridge does not
+            otherwise expose (build_mol_spec only emits the smoothed matrix). The same
+            compute_raw_bounds helper feeds build_mol_spec, so the two paths cannot diverge on how
+            the matrix is built.
+flags       set15bounds=true, scaleVDW=false, useMacrocycle14config=true, forceTransAmides=true,
+            set14bounds=true, set13bounds=true — identical to build_mol_spec / the Python
+            GetMoleculeBoundsMatrix(doTriangleSmoothing, useMacrocycle14config) call.
+purpose     oracle for the pure-Rust setTopolBounds port. The Rust constructor runs outside the
+            RDKit container, so its parity gate compares against these stored values. This is the
+            raw matrix; smoothing is validated separately (bb-embed::bounds::triangle_smooth vs
+            RDKit's triangleSmoothBounds).
+format      gzipped JSONL, one object per corpus line:
+            {"name": <id>, "n": <atoms>, "bounds": [<n*n row-major f64, upper-tri=UB lower-tri=LB>]}
+            Values are full round-trippable f64 (shortest exact decimal), so the fixture does not
+            round at the gate tolerance. A molecule RDKit cannot parse is {"name": <id>,
+            "error": "unparseable"} rather than dropped, so the count matches the corpus.
+corpus      first 600 of validation/seeds_5000.smi (identical molecule set to torsions_seeds600)
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs), matching every other fixture
+generated   2026-08-14

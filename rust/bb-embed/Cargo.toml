@@ -24,6 +24,10 @@ profile = []
 
 [dev-dependencies]
 criterion = "0.5"
+# For the golden-fixture parity gates (tests/parity_goldens.rs): build the native spec to evaluate
+# native force fields against committed RDKit goldens. No RDKit toolchain needed. bb-spec does not
+# depend on bb-embed, so this dev-dep introduces no cycle.
+bb-spec = { path = "../bb-spec" }
 
 [lints]
 workspace = true

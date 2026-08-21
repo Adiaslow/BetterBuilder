@@ -1,8 +1,14 @@
-//! Per-stage profiling of the single-conformer embed. `report_counts` prints force-field-eval counts
-//! and per-stage wall time for one representative embed (the definitive test of the argmin
-//! double-evaluation hypothesis); criterion then times each stage rigorously.
+//! Per-stage benchmarks of the single-conformer embed. `report_counts` prints per-stage wall time for
+//! one embed; criterion then times each stage.
+//!
+//! `BB_SPEC` is required and names the MoleculeSpec JSON to benchmark (`bb-spec-native` produces one):
 //!
 //!   BB_SPEC=/path/to/spec.json cargo bench -p bb-embed
+//!
+//! The FF-eval COUNTS in `report_counts` are gated behind the `profile` feature (zero-cost otherwise),
+//! so they read 0 unless run as `cargo bench -p bb-embed --features profile`. The wall times are always
+//! real. Criterion's "change/regressed" line compares to its own saved baseline (per spec) — meaningless
+//! across a spec change, so read the absolute times, not the delta, unless you re-baselined on this spec.
 
 use std::time::Instant;
 
@@ -17,10 +23,27 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 fn load_spec() -> MoleculeSpec {
-    let default = "/private/tmp/claude-501/-Users-Adam-ShoichetLab-BetterBuilder/c1ae8be0-188b-4434-8d87-06a6afb984e7/scratchpad/mc0001_spec.json";
-    let path = std::env::var("BB_SPEC").unwrap_or_else(|_| default.to_string());
+    let path = std::env::var("BB_SPEC").unwrap_or_else(|_| {
+        panic!(
+            "BB_SPEC is not set. Point it at a MoleculeSpec JSON, e.g.\n    \
+             bb-spec \"<smiles>\" > /tmp/spec.json\n    \
+             BB_SPEC=/tmp/spec.json cargo bench -p bb-embed"
+        )
+    });
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    serde_json::from_str(&text).expect("parse spec")
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+}
+
+/// Metric-matrix init, re-drawing on a `computeInitialCoords` reject exactly as the real embed loop
+/// does (a `None` is a degenerate sampled distance matrix, not a bad spec — a fresh draw from the same
+/// RNG stream usually succeeds). Deterministic given the seed; panics only if 1000 draws all reject.
+fn init4(spec: &MoleculeSpec, rng: &mut StdRng) -> Vec<f64> {
+    for _ in 0..1000 {
+        if let Some(v) = init::metric_matrix(spec, 4, rng) {
+            return v;
+        }
+    }
+    panic!("metric_matrix rejected the bench spec on 1000 consecutive draws");
 }
 
 fn project_4d_to_3d(a4: &[f64], n: usize) -> Vec<f64> {
@@ -33,11 +56,11 @@ fn project_4d_to_3d(a4: &[f64], n: usize) -> Vec<f64> {
     c3
 }
 
-/// One representative seed-path embed, printing FF-eval counts + wall time per stage.
+/// One seed-path embed, printing FF-eval counts and wall time per stage.
 fn report_counts(spec: &MoleculeSpec) {
     let n = spec.n_atoms;
     let mut rng = StdRng::seed_from_u64(1);
-    let a0 = init::metric_matrix(spec, 4, &mut rng);
+    let a0 = init4(spec, &mut rng);
 
     reset_ff_evals();
     let t = Instant::now();
@@ -78,7 +101,7 @@ fn report_counts(spec: &MoleculeSpec) {
 
     // single-eval costs
     let mut rng = StdRng::seed_from_u64(2);
-    let x4 = init::metric_matrix(spec, 4, &mut rng);
+    let x4 = init4(spec, &mut rng);
     reset_ff_evals();
     let t = Instant::now();
     for _ in 0..1000 {
@@ -140,7 +163,7 @@ fn profile(c: &mut Criterion) {
     g.bench_function("stage_a_minimize", |b| {
         let mut rng = StdRng::seed_from_u64(1);
         b.iter_batched(
-            || init::metric_matrix(&spec, 4, &mut rng),
+            || init4(&spec, &mut rng),
             |a| {
                 black_box(minimize::minimize_stage_a(
                     &spec,
@@ -159,7 +182,7 @@ fn profile(c: &mut Criterion) {
         // fixed post-Stage-A/B geometry to build constraints from
         let a4 = minimize::minimize_stage_a(
             &spec,
-            init::metric_matrix(&spec, 4, &mut rng),
+            init4(&spec, &mut rng),
             4,
             &[],
             BASIN_DEFAULT,
@@ -185,14 +208,14 @@ fn profile(c: &mut Criterion) {
     });
     g.bench_function("stage_a_energy_grad_once", |b| {
         let mut rng = StdRng::seed_from_u64(1);
-        let x = init::metric_matrix(&spec, 4, &mut rng);
+        let x = init4(&spec, &mut rng);
         b.iter(|| black_box(stage_a_energy_grad(&spec, &x, 4, BASIN_DEFAULT)));
     });
     g.bench_function("stage_c_energy_grad_once", |b| {
         let mut rng = StdRng::seed_from_u64(1);
         let a4 = minimize::minimize_stage_a(
             &spec,
-            init::metric_matrix(&spec, 4, &mut rng),
+            init4(&spec, &mut rng),
             4,
             &[],
             BASIN_DEFAULT,

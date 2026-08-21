@@ -1,6 +1,6 @@
 [package]
 name = "bb-py"
-description = "Python bindings for the BetterBuilder engine: a maximally thin PyO3 wrapper over the Rust backend (bb-rdkit setup + bb-embed embed). All logic stays in Rust; Python calls one function."
+description = "Python bindings for the BetterBuilder engine: a maximally thin PyO3 wrapper over the Rust backend (bb-spec RDKit-free setup + bb-embed embed). All logic stays in Rust; Python calls one function."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,8 @@ name = "betterbuilder" # the importable Python module name
 crate-type = ["cdylib"]
 
 [dependencies]
-bb-core = { path = "../bb-core" }
 bb-embed = { path = "../bb-embed" }
-bb-rdkit = { path = "../bb-rdkit" }
+bb-spec = { path = "../bb-spec" }
 # abi3-py310: one wheel works on CPython 3.10+ (extension-module resolves libpython at import time).
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
 

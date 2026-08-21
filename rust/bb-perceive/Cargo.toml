@@ -1,0 +1,19 @@
+[package]
+name = "bb-perceive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+mendeleev = { version = "0.8.4", default-features = false, features = ["atomic_number", "element_list", "symbol"] }
+pest = "2.9.0"
+pest_derive = "2.9.0"
+yowl = "0.4.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

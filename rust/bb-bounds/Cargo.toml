@@ -1,0 +1,13 @@
+[package]
+name = "bb-bounds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bb-perceive = { path = "../bb-perceive" }
+
+[lints]
+workspace = true

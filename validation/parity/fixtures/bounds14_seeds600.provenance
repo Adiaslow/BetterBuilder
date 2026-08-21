@@ -1,0 +1,19 @@
+source      RDKit's raw (pre-triangleSmooth) bounds matrix with 1-2, 1-3, 1-4 and van der Waals
+            bounds set: setTopolBounds(mol, mat, set15=false, scaleVDW=false,
+            useMacrocycle14config=true, forceTransAmides=true, set14=true, set13=true), i.e.
+            set12 + set13 + set14Bounds + setLowerBoundVDW. Captured through bb-rdkit's cxx bridge
+            (bb-rdkit::raw_bounds_stage -> bb::raw_bounds_stage) on the post-AddHs molecule.
+purpose     gate for the pure-Rust set14Bounds port (bb_bounds::bounds::set14) — the 1-4 torsion
+            layer, including the macrocycle-specific heuristics and double-bond stereo. Match is to
+            floating-point precision (worst |delta| ~1.8e-15 over 4,016,579 cells across 600
+            molecules): set14 uses cos/sin/sqrt (compute14Dist*), so it is gated at |delta| < 1e-6
+            rather than bit-exact. Double-bond stereo is perceived by bb_perceive::stereo (a port of
+            setBondStereoFromDirections); its CIS/TRANS representation differs from RDKit's modern
+            Z/E on some bonds, but _getAtomStereo normalises both to the queried 1-4 atoms, so the
+            bounds match — confirmed here, not assumed.
+format      gzipped JSONL, one object per corpus line:
+            {"name": <id>, "bounds14": [<n*n row-major f64 in RDKit BoundsMatrix layout>]}
+            A SMILES RDKit cannot parse is {"name": <id>, "error": "unparseable"}.
+corpus      first 600 of validation/seeds_5000.smi (same molecule set as raw_bounds_seeds600)
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

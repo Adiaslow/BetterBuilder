@@ -1,0 +1,9 @@
+source      RDKit's own accessors, read inside the production image:
+            PeriodicTable::GetValenceList / GetDefaultValence / GetNOuterElecs / GetRvdw
+image       build_macrocycle_final.sif  (DOCKBASE=/soft/DOCK-macro-latest6)
+rdkit       2026.09.1pre, pin 1dfc9b7a1 (see rdkit-patch/README.md)
+generated   2026-08-14 by validation/parity/dump_valence.py
+elements    118
+note        Read through the API rather than parsed out of atomic_data.cpp: the TSV there has a
+            blank row-number column for some elements, so column arithmetic mis-reads them.
+license     RDKit is BSD-3-Clause; this is its data. See rdkit-patch/README.md.

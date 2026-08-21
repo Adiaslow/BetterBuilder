@@ -1,0 +1,11 @@
+source      RDKit's per-atom getChiralTag(), captured through bb-rdkit's cxx bridge
+            (bb-rdkit::chiral_tags) on the post-AddHs molecule. Enum ints: CHI_UNSPECIFIED=0,
+            CHI_TETRAHEDRAL_CW=1, CHI_TETRAHEDRAL_CCW=2 (higher values are non-tetrahedral types).
+purpose     gate for the pure-Rust tetrahedral-chirality port (bb_perceive::chirality), which
+            reproduces SmilesParseOps::AdjustAtomChiralityFlags (@/@@ + GetBondOrdering perturbation
+            + chiralAtomNeedsTagInversion). Exact per-atom match: 0 mismatches over 403,420 atoms /
+            5,633 stereocenters across all of validation/seeds_5000.smi.
+format      gzipped JSONL: {"name": <id>, "tags": [<getChiralTag int per atom, post-AddHs order>]}
+corpus      first 600 of validation/seeds_5000.smi
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

@@ -1,0 +1,31 @@
+diff --git a/Code/GraphMol/QueryOps.cpp b/Code/GraphMol/QueryOps.cpp
+index 1f093329f..55d913c49 100644
+--- a/Code/GraphMol/QueryOps.cpp
++++ b/Code/GraphMol/QueryOps.cpp
+@@ -1021,7 +1021,11 @@ void finalizeAtomRingSizeQuery(Queries::Query<int, Atom const *, true> *query,
+       auto rq = static_cast<ATOM_RANGE_QUERY *>(query);
+       auto uv = rq->getUpper();
+       auto lv = rq->getLower();
+-      auto [lo, uo] = rq->getEndsOpen();
++      //auto [lo, uo] = rq->getEndsOpen();
++      //query->setDataFunc([lv, uv, lo, uo](Atom const *at) {
++      auto ends = rq->getEndsOpen();
++      bool lo = ends.first;
++      bool uo = ends.second;
+       query->setDataFunc([lv, uv, lo, uo](Atom const *at) {
+         return queryAtomIsInRingOfSize(at, lv, uv, lo, uo);
+       });
+diff --git a/Code/RDGeneral/JSONHelpers.h b/Code/RDGeneral/JSONHelpers.h
+index e2bbfde59..577075a1b 100644
+--- a/Code/RDGeneral/JSONHelpers.h
++++ b/Code/RDGeneral/JSONHelpers.h
+@@ -15,7 +15,8 @@ template <typename T>
+ typename T::_integral flagsFromJson(const boost::property_tree::ptree &pt,
+                                     bool *keysFound = nullptr) {
+   std::array<typename T::_integral, 2> flagsByType;
+-  flagsByType.fill(static_cast<T::_integral>(0));
++  //flagsByType.fill(static_cast<T::_integral>(0));
++  flagsByType.fill(static_cast<typename T::_integral>(0));
+   if (keysFound) {
+     *keysFound = false;
+   }

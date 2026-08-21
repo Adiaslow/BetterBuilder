@@ -1,0 +1,8 @@
+source      validation/seeds_5000.smi (see seeds_5000.provenance for its lineage)
+selection   molecules where bb-spec reports core_seeds=20, sidechain_confs=10 — the
+            count_exo_rotatable branch (exo<=2) unexercised by seeds_100.smi.
+            SELECTED BY OUR OWN CODE, deliberately: the oracle then either confirms the
+            branch or contradicts it, so a selection error surfaces as a stage-2 failure
+            rather than as silent absence.
+frequency   295 of 5000 in the sample take this branch (5.9%)
+md5         11cf52d71b56231d7d70250edf23ec5a

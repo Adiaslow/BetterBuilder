@@ -1,0 +1,24 @@
+[package]
+name = "bb-spec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bb-core = { path = "../bb-core" }
+bb-perceive = { path = "../bb-perceive" }
+bb-bounds = { path = "../bb-bounds" }
+serde_json.workspace = true
+
+[[bin]]
+name = "bb-spec-native"
+path = "src/bin/spec_native.rs"
+
+[[bin]]
+name = "bb-spec-native-batch"
+path = "src/bin/spec_native_batch.rs"
+
+[lints]
+workspace = true

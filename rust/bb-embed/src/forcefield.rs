@@ -1,19 +1,20 @@
-//! Stage-A DistGeom force field: distance-bound violation (all dims) + chiral-volume (x,y,z) +
-//! 4th-dimension penalty. f64, analytic gradients, finite-difference checked. This is the
-//! candidate's reimplementation of ETKDG's Stage-A objective; ultimate validation is ensemble
-//! RMSD vs the oracle. To stay faithful, we **match RDKit's actual gradients** — RDKit's
-//! `ChiralViolationContribs`/`FourthDimContribs` omit the factor of 2 (their gradient is the
-//! derivative of `0.5·w·x²`, not `w·x²`), so we use energy `0.5·w·x²` + gradient `w·x`, giving the
-//! exact same force RDKit descends on (and keeping energy/gradient consistent for finite-diff).
-//! The distance term already copies RDKit's exact preFactors.
+//! Force-field terms for the staged embed, in f64 with analytic gradients.
+//!
+//! Stages A and B ([`stage_a_energy_grad`], [`stage_b_energy_grad`]): distance-bound violation over
+//! all dims + chiral volume (x,y,z) + 4th-dimension penalty, differing only in the chiral and
+//! 4th-dimension weights. Stage C ([`stage_c_energy_grad`]): M6 experimental torsions + UFF
+//! impropers + flat-bottom distance and angle constraints.
+//!
+//! The chiral and 4th-dimension terms use energy `0.5·w·x²` with gradient `w·x`, as in RDKit's
+//! `ChiralViolationContribs` / `FourthDimContribs`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bb_core::vec3::{cross, dot as dot3, norm as norm3, scale as scale3, sub as subv};
 use bb_core::MoleculeSpec;
 
-/// Diagnostic counter: total DistGeom (Stage A/B) + Stage-C force-field evaluations. Gated behind the
-/// `profile` feature so it adds zero overhead (and no cross-thread atomic contention) in production /
-/// parallel runs; enable with `--features profile` for profiling.
+/// Count of DistGeom (Stage A/B) and Stage-C force-field evaluations. Only incremented when the
+/// `profile` feature is enabled.
 pub static FF_EVALS: AtomicU64 = AtomicU64::new(0);
 
 /// Count one force-field evaluation (no-op unless the `profile` feature is on).
@@ -35,18 +36,7 @@ pub const W_DIST: f64 = 1.0;
 pub const W_CHIRAL: f64 = 1.0;
 pub const W_FOURTH: f64 = 0.1;
 
-#[inline]
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-#[inline]
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
+/// Difference of two atoms read from a strided coordinate slice: `p[a] − p[b]` (x,y,z only).
 #[inline]
 fn sub3(p: &[f64], a: usize, b: usize, dim: usize) -> [f64; 3] {
     [
@@ -72,8 +62,66 @@ pub fn stage_a_energy_grad(
     dist_geom_energy_grad(spec, coords, dim, W_CHIRAL, W_FOURTH, basin)
 }
 
-/// Distance-bound violation term (all dims), accumulated into `e`/`g` — the O(N²) DistGeom pairwise
-/// energy. RDKit's exact 4/8 preFactors; the basin filter drops loosely-bounded (flexible) pairs.
+/// Native's chiral + 4th-dimension Stage-A energy in native's own (gradient-consistent, `½·w·x²`)
+/// convention, at Stage-A weights. This is exactly the amount by which RDKit's `calcEnergy` exceeds
+/// native's total energy (RDKit's Chiral/FourthDim `getEnergy` use `w·x²`, i.e. twice native's) — see
+/// [`stage_a_reject_energy`].
+fn chiral_fourth_energy(spec: &MoleculeSpec, coords: &[f64], dim: usize) -> f64 {
+    let mut e = 0.0;
+    for cs in &spec.chiral_sets {
+        let (vol, bound, _) = chiral_vol(coords, cs, dim);
+        if let Some(b) = bound {
+            e += 0.5 * W_CHIRAL * (vol - b) * (vol - b);
+        }
+    }
+    if dim == 4 {
+        for i in 0..spec.n_atoms {
+            let w = coords[i * dim + 3];
+            e += 0.5 * W_FOURTH * w * w;
+        }
+    }
+    e
+}
+
+/// The signed chiral volume of one center, its clamped bound (`Some(limit)` when `vol` is outside
+/// `[vol_lo, vol_hi]`, else `None`), and the three edge vectors `[i−l, j−l, k−l]` the gradient reuses.
+/// Single source for the chiral-volume test shared by the gradient accumulation and the energy-only
+/// reject path.
+#[inline]
+fn chiral_vol(coords: &[f64], cs: &bb_core::ChiralSet, dim: usize) -> (f64, Option<f64>, [[f64; 3]; 3]) {
+    let (i, j, k, l) = (
+        cs.atoms[0] as usize,
+        cs.atoms[1] as usize,
+        cs.atoms[2] as usize,
+        cs.atoms[3] as usize,
+    );
+    let v1 = sub3(coords, i, l, dim);
+    let v2 = sub3(coords, j, l, dim);
+    let v3 = sub3(coords, k, l, dim);
+    let vol = dot3(v1, cross(v2, v3));
+    let bound = if vol < cs.vol_lo {
+        Some(cs.vol_lo)
+    } else if vol > cs.vol_hi {
+        Some(cs.vol_hi)
+    } else {
+        None
+    };
+    (vol, bound, [v1, v2, v3])
+}
+
+/// RDKit's Stage-A `calcEnergy` — the value `firstMinimization` thresholds against
+/// `MAX_MINIMIZED_E_PER_ATOM` (0.05/atom) for its per-atom energy reject. RDKit's Chiral/FourthDim
+/// `getEnergy` use `w·x²` (no ½), *inconsistent* with their `w·x` gradient; native's own energy uses
+/// the gradient-consistent `½·w·x²`. So RDKit's reject energy is native's total energy plus the
+/// chiral+4th contribution once more (the distance term matches). Used ONLY to reproduce RDKit's
+/// reject decision faithfully — never as an optimization objective (native minimizes its own,
+/// gradient-consistent energy). Verified boundary-exact against RDKit's `calcEnergy` bridge.
+pub fn stage_a_reject_energy(spec: &MoleculeSpec, coords: &[f64], dim: usize, basin: f64) -> f64 {
+    stage_a_energy_grad(spec, coords, dim, basin).0 + chiral_fourth_energy(spec, coords, dim)
+}
+
+/// Distance-bound violation term over all dims, accumulated into `e`/`g` for every atom pair. Pairs
+/// whose bounds are wider than `basin` are skipped.
 #[inline]
 fn accum_dist_term(
     spec: &MoleculeSpec,
@@ -86,39 +134,136 @@ fn accum_dist_term(
     let n = spec.n_atoms;
     for i in 0..n {
         for j in (i + 1)..n {
-            let ub = spec.ub(i, j) as f64;
-            let lb = spec.lb(i, j) as f64;
+            let ub = spec.ub64(i, j);
+            let lb = spec.lb64(i, j);
             if ub - lb > basin {
                 continue; // basin filter: skip loosely-bounded (flexible) pairs
             }
-            let (ub2, lb2) = (ub * ub, lb * lb);
-            let mut d2 = 0.0;
+            accum_one_pair(coords, dim, i, j, lb * lb, ub * ub, e, g);
+        }
+    }
+}
+
+/// A distance-bound atom pair that survives the basin filter: `(i, j, lb², ub²)`. The surviving set
+/// and its squared bounds are constant across a whole minimization, so [`build_dist_pairs`] computes
+/// it once and the hot Stage-A/B eval iterates it instead of re-scanning all n²/2 pairs per call.
+pub type DistPair = (usize, usize, f64, f64);
+
+/// Basin-surviving distance pairs for `basin`, in the exact `(i<j)` row-major order the per-eval scan
+/// visited — so accumulating over them reproduces the scan's summation order bit-for-bit.
+pub fn build_dist_pairs(spec: &MoleculeSpec, basin: f64) -> Vec<DistPair> {
+    let n = spec.n_atoms;
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let ub = spec.ub64(i, j);
+            let lb = spec.lb64(i, j);
+            if ub - lb > basin {
+                continue;
+            }
+            pairs.push((i, j, lb * lb, ub * ub));
+        }
+    }
+    pairs
+}
+
+/// Distance-bound contribution of one pair with squared bounds `(lb2, ub2)`, accumulated into `e`/`g`.
+/// The single source for the Stage-A/B distance term: the basin scan and the pre-built pair list both
+/// dispatch here, so the physics — and its exact FP rounding — exist in one place. `d = √d2` is taken
+/// once per violating pair and reused for both `pre` and the gradient normalization.
+#[inline]
+fn accum_one_pair(
+    coords: &[f64],
+    dim: usize,
+    i: usize,
+    j: usize,
+    lb2: f64,
+    ub2: f64,
+    e: &mut f64,
+    g: &mut [f64],
+) {
+    let mut d2 = 0.0;
+    for c in 0..dim {
+        let d = coords[i * dim + c] - coords[j * dim + c];
+        d2 += d * d;
+    }
+    let (val, pre, d) = if d2 > ub2 {
+        let d = d2.sqrt();
+        (d2 / ub2 - 1.0, 4.0 * (d2 / ub2 - 1.0) * (d / ub2), d)
+    } else if d2 < lb2 {
+        let d = d2.sqrt();
+        let s = d2 + lb2;
+        (
+            2.0 * lb2 / s - 1.0,
+            8.0 * lb2 * d * (1.0 - 2.0 * lb2 / s) / (s * s),
+            d,
+        )
+    } else {
+        return; // within bounds: no contribution (matches the old (0,0) + `val > 0` guard)
+    };
+    if val > 0.0 {
+        *e += W_DIST * val * val;
+        if d > 1e-12 {
             for c in 0..dim {
-                let d = coords[i * dim + c] - coords[j * dim + c];
-                d2 += d * d;
+                let gg = W_DIST * pre * (coords[i * dim + c] - coords[j * dim + c]) / d;
+                g[i * dim + c] += gg;
+                g[j * dim + c] -= gg;
             }
-            let (val, pre) = if d2 > ub2 {
-                (d2 / ub2 - 1.0, 4.0 * (d2 / ub2 - 1.0) * (d2.sqrt() / ub2))
-            } else if d2 < lb2 {
-                let s = d2 + lb2;
-                (
-                    2.0 * lb2 / s - 1.0,
-                    8.0 * lb2 * d2.sqrt() * (1.0 - 2.0 * lb2 / s) / (s * s),
-                )
-            } else {
-                (0.0, 0.0)
-            };
-            if val > 0.0 {
-                *e += W_DIST * val * val;
-                let d = d2.sqrt();
-                if d > 1e-12 {
-                    for c in 0..dim {
-                        let gg = W_DIST * pre * (coords[i * dim + c] - coords[j * dim + c]) / d;
-                        g[i * dim + c] += gg;
-                        g[j * dim + c] -= gg;
-                    }
-                }
+        }
+    }
+}
+
+/// Stage-A/B distance term over a pre-built basin-surviving pair list (the hot-path form of
+/// [`accum_dist_term`]).
+#[inline]
+fn accum_dist_term_pairs(coords: &[f64], dim: usize, pairs: &[DistPair], e: &mut f64, g: &mut [f64]) {
+    for &(i, j, lb2, ub2) in pairs {
+        accum_one_pair(coords, dim, i, j, lb2, ub2, e, g);
+    }
+}
+
+/// Chiral-volume (weight `w_chiral`, x/y/z) and fourth-dimension (weight `w_fourth`, 4th coord)
+/// penalties — the part of the DistGeom objective shared by the basin-scan and pre-built-pair evals.
+#[inline]
+fn accum_chiral_fourth(
+    spec: &MoleculeSpec,
+    coords: &[f64],
+    dim: usize,
+    w_chiral: f64,
+    w_fourth: f64,
+    e: &mut f64,
+    g: &mut [f64],
+) {
+    // --- chiral-volume violation (x,y,z only) ---
+    for cs in &spec.chiral_sets {
+        let (vol, bound, [v1, v2, v3]) = chiral_vol(coords, cs, dim);
+        if let Some(b) = bound {
+            let (i, j, k, l) = (
+                cs.atoms[0] as usize,
+                cs.atoms[1] as usize,
+                cs.atoms[2] as usize,
+                cs.atoms[3] as usize,
+            );
+            *e += 0.5 * w_chiral * (vol - b) * (vol - b);
+            let pre = w_chiral * (vol - b); // matches RDKit ChiralViolationContribs (no factor of 2)
+            let d_i = cross(v2, v3);
+            let d_j = cross(v3, v1);
+            let d_k = cross(v1, v2);
+            for c in 0..3 {
+                g[i * dim + c] += pre * d_i[c];
+                g[j * dim + c] += pre * d_j[c];
+                g[k * dim + c] += pre * d_k[c];
+                g[l * dim + c] += pre * (-d_i[c] - d_j[c] - d_k[c]);
             }
+        }
+    }
+
+    // --- fourth-dimension penalty (4th coord only) ---
+    if dim == 4 {
+        for i in 0..spec.n_atoms {
+            let w = coords[i * dim + 3];
+            *e += 0.5 * w_fourth * w * w;
+            g[i * dim + 3] += w_fourth * w; // matches RDKit FourthDimContribs (no factor of 2)
         }
     }
 }
@@ -153,76 +298,74 @@ fn dist_geom_energy_grad(
 
     // --- distance-bound violation (all dims), weight 1.0 ---
     accum_dist_term(spec, coords, dim, basin, &mut e, &mut g);
-
-    // --- chiral-volume violation (x,y,z only), weight 1.0 ---
-    for cs in &spec.chiral_sets {
-        let (i, j, k, l) = (
-            cs.atoms[0] as usize,
-            cs.atoms[1] as usize,
-            cs.atoms[2] as usize,
-            cs.atoms[3] as usize,
-        );
-        let v1 = sub3(coords, i, l, dim);
-        let v2 = sub3(coords, j, l, dim);
-        let v3 = sub3(coords, k, l, dim);
-        let vol = dot3(v1, cross(v2, v3));
-        let bound = if vol < cs.vol_lo as f64 {
-            Some(cs.vol_lo as f64)
-        } else if vol > cs.vol_hi as f64 {
-            Some(cs.vol_hi as f64)
-        } else {
-            None
-        };
-        if let Some(b) = bound {
-            e += 0.5 * w_chiral * (vol - b) * (vol - b);
-            let pre = w_chiral * (vol - b); // matches RDKit ChiralViolationContribs (no factor of 2)
-            let d_i = cross(v2, v3);
-            let d_j = cross(v3, v1);
-            let d_k = cross(v1, v2);
-            for c in 0..3 {
-                g[i * dim + c] += pre * d_i[c];
-                g[j * dim + c] += pre * d_j[c];
-                g[k * dim + c] += pre * d_k[c];
-                g[l * dim + c] += pre * (-d_i[c] - d_j[c] - d_k[c]);
-            }
-        }
-    }
-
-    // --- fourth-dimension penalty (4th coord only), weight 0.1 ---
-    if dim == 4 {
-        for i in 0..n {
-            let w = coords[i * dim + 3];
-            e += 0.5 * w_fourth * w * w;
-            g[i * dim + 3] += w_fourth * w; // matches RDKit FourthDimContribs (no factor of 2)
-        }
-    }
+    // --- chiral-volume (x,y,z) + fourth-dimension (4th coord) penalties ---
+    accum_chiral_fourth(spec, coords, dim, w_chiral, w_fourth, &mut e, &mut g);
 
     (e, g)
 }
 
-#[inline]
-fn scale3(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
+/// Same DistGeom objective as [`dist_geom_energy_grad`] but iterating a pre-built basin-surviving
+/// [`DistPair`] list instead of re-scanning all pairs — the hot-path form used by the minimizer, which
+/// builds the list once per Stage-A/B minimization. Bit-identical to the scan form (same surviving
+/// pairs, same order, same physics via [`accum_one_pair`]).
+fn dist_geom_energy_grad_pairs(
+    spec: &MoleculeSpec,
+    coords: &[f64],
+    dim: usize,
+    w_chiral: f64,
+    w_fourth: f64,
+    pairs: &[DistPair],
+) -> (f64, Vec<f64>) {
+    ff_tick();
+    debug_assert_eq!(coords.len(), spec.n_atoms * dim);
+    let mut e = 0.0;
+    let mut g = vec![0.0f64; coords.len()];
+    accum_dist_term_pairs(coords, dim, pairs, &mut e, &mut g);
+    accum_chiral_fourth(spec, coords, dim, w_chiral, w_fourth, &mut e, &mut g);
+    (e, g)
 }
-#[inline]
-fn subv(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+/// Stage-A objective over a pre-built [`DistPair`] list (see [`stage_a_energy_grad`]).
+pub fn stage_a_energy_grad_pairs(
+    spec: &MoleculeSpec,
+    coords: &[f64],
+    dim: usize,
+    pairs: &[DistPair],
+) -> (f64, Vec<f64>) {
+    dist_geom_energy_grad_pairs(spec, coords, dim, W_CHIRAL, W_FOURTH, pairs)
 }
-#[inline]
-fn norm3(a: [f64; 3]) -> f64 {
-    dot3(a, a).sqrt()
+
+/// Stage-B objective over a pre-built [`DistPair`] list (see [`stage_b_energy_grad`]).
+pub fn stage_b_energy_grad_pairs(
+    spec: &MoleculeSpec,
+    coords: &[f64],
+    dim: usize,
+    pairs: &[DistPair],
+) -> (f64, Vec<f64>) {
+    dist_geom_energy_grad_pairs(spec, coords, dim, 0.2, 1.0, pairs)
 }
+
+/// A point read from a strided coordinate slice (x,y,z only).
 #[inline]
 fn pt(p: &[f64], i: usize, dim: usize) -> [f64; 3] {
     [p[i * dim], p[i * dim + 1], p[i * dim + 2]]
 }
 
-/// M6 experimental-torsion term (x,y,z only): `E = Σ_{m=1..6} V[m-1]·(1 + signs[m-1]·cos(m·φ))`,
-/// φ = signed dihedral(i,j,k,l). Analytic gradient via the standard four-atom dihedral projection
-/// (translation-invariant: the four position gradients sum to zero). Carries Divya's patched V.
+/// M6 experimental-torsion term over `spec.exp_torsions` (x,y,z only):
+/// `E = Σ_{m=1..6} V[m-1]·(1 + signs[m-1]·cos(m·φ))`, φ = signed dihedral(i,j,k,l). Torsions whose
+/// geometry is collinear are skipped.
 pub fn torsion_energy_grad(spec: &MoleculeSpec, coords: &[f64], dim: usize) -> (f64, Vec<f64>) {
     let mut e = 0.0;
     let mut g = vec![0.0f64; coords.len()];
+    // RDKit `TorsionAngleContribs::getGrad` *returns* from the whole loop on the first torsion whose
+    // plane-normal magnitude is `isDoubleZero` (collinear, e.g. through an sp nitrile/alkyne),
+    // abandoning the gradient of that torsion AND every torsion after it in emission order. Its
+    // *energy* (`calcTorsionEnergyM6`) has no such early-out. We reproduce that behavior exactly:
+    // `grad_dead` latches at the first degenerate torsion and suppresses only the gradient thereafter,
+    // while the energy keeps accumulating. This depends on `spec.exp_torsions` being in RDKit's
+    // emission order — which native's assignment reproduces by construction (library file order ×
+    // match order × first-claim dedup); the corpus parity gate is the check on that.
+    let mut grad_dead = false;
     for t in &spec.exp_torsions {
         let (i, j, k, l) = (
             t.atoms[0] as usize,
@@ -236,111 +379,207 @@ pub fn torsion_energy_grad(spec: &MoleculeSpec, coords: &[f64], dim: usize) -> (
             pt(coords, k, dim),
             pt(coords, l, dim),
         );
-        let b1 = [pj[0] - pi[0], pj[1] - pi[1], pj[2] - pi[2]];
-        let b2 = [pk[0] - pj[0], pk[1] - pj[1], pk[2] - pj[2]];
-        let b3 = [pl[0] - pk[0], pl[1] - pk[1], pl[2] - pk[2]];
-        let n1 = cross(b1, b2);
-        let n2 = cross(b2, b3);
-        let (n1sq, n2sq, b2sq) = (dot3(n1, n1), dot3(n2, n2), dot3(b2, b2));
-        if n1sq < 1e-10 || n2sq < 1e-10 || b2sq < 1e-10 {
-            continue; // degenerate (collinear) — skip
+        // RDKit `TorsionAngleContribs::getGrad` convention: r0=i-j, r1=k-j, r2=j-k, r3=l-k;
+        // the two plane normals are t0=r0×r1, t1=r2×r3 (equal to native's ∓n1,∓n2, so cosφ agrees).
+        let r0 = subv(pi, pj);
+        let r1 = subv(pk, pj);
+        let r2 = subv(pj, pk);
+        let r3 = subv(pl, pk);
+        let t0 = cross(r0, r1);
+        let t1 = cross(r2, r3);
+        let (d0, d1) = (norm3(t0), norm3(t1));
+        if d0 < 1e-10 || d1 < 1e-10 {
+            // RDKit returns here: this torsion and all after it contribute no gradient.
+            grad_dead = true;
+            continue; // degenerate (collinear) — no energy or gradient for this one either
         }
-        let b2n = b2sq.sqrt();
-        let phi = (dot3(cross(n1, n2), b2) / b2n).atan2(dot3(n1, n2));
+        let t0n = scale3(t0, 1.0 / d0);
+        let t1n = scale3(t1, 1.0 / d1);
+        let cos_phi = dot3(t0n, t1n).clamp(-1.0, 1.0);
+        let sin_phi_sq = 1.0 - cos_phi * cos_phi;
+        let sin_phi = if sin_phi_sq > 0.0 { sin_phi_sq.sqrt() } else { 0.0 };
+        let phi = cos_phi.acos();
 
-        let mut de_dphi = 0.0;
+        // Energy: E = Σ V[m-1]·(1 + signs[m-1]·cos(m·φ)). cos is even, so |φ| suffices.
         for idx in 0..6 {
             let m = (idx + 1) as f64;
-            let v = t.v[idx] as f64;
-            let s = t.signs[idx] as f64;
-            e += v * (1.0 + s * (m * phi).cos());
-            de_dphi += v * s * (-m) * (m * phi).sin();
+            e += t.v[idx] * (1.0 + t.signs[idx] as f64 * (m * phi).cos());
         }
 
-        let dphi_di = scale3(n1, -b2n / n1sq);
-        let dphi_dl = scale3(n2, b2n / n2sq);
-        let pp = dot3(b1, b2) / b2sq;
-        let qq = dot3(b3, b2) / b2sq;
-        let dphi_dj = [
-            -(pp + 1.0) * dphi_di[0] + qq * dphi_dl[0],
-            -(pp + 1.0) * dphi_di[1] + qq * dphi_dl[1],
-            -(pp + 1.0) * dphi_di[2] + qq * dphi_dl[2],
+        // gradient abandoned once RDKit's getGrad has returned (at an earlier degenerate torsion)
+        if grad_dead {
+            continue;
+        }
+
+        // dE/dφ via RDKit's exact Chebyshev-derivative polynomial. NB: RDKit's m=6 term reuses
+        // forceConstants[4]/signs[4] (not [5]) — an energy/gradient inconsistency in RDKit itself;
+        // we replicate it so the gradient (what the minimizer follows) matches bit-for-bit.
+        let (c1, c2, c3, c4, c5) = (
+            cos_phi,
+            cos_phi.powi(2),
+            cos_phi.powi(3),
+            cos_phi.powi(4),
+            cos_phi.powi(5),
+        );
+        let (fc, sg) = (|x: usize| t.v[x], |x: usize| t.signs[x] as f64);
+        let de_dphi = -fc(0) * sg(0) * sin_phi
+            - 2.0 * fc(1) * sg(1) * (2.0 * c1 * sin_phi)
+            - 3.0 * fc(2) * sg(2) * (4.0 * c2 * sin_phi - sin_phi)
+            - 4.0 * fc(3) * sg(3) * (8.0 * c3 * sin_phi - 4.0 * c1 * sin_phi)
+            - 5.0 * fc(4) * sg(4) * (16.0 * c4 * sin_phi - 12.0 * c2 * sin_phi + sin_phi)
+            - 6.0 * fc(4) * sg(4) * (32.0 * c5 * sin_phi - 32.0 * c3 * sin_phi + 6.0 * sin_phi);
+
+        // sinTerm = -dE/dφ · 1/sinφ analytically cancels the 1/sinφ in dφ/dx (the source of the old
+        // form's instability near collinear); near sinφ=0 RDKit substitutes 1/cosφ (Niketic & Rasmussen).
+        let sin_term = -de_dphi * if sin_phi < 1e-10 { 1.0 / cos_phi } else { 1.0 / sin_phi };
+
+        // calcTorsionGrad (UFF/TorsionAngle.cpp): d(cosφ)/dt projected onto the four atoms.
+        let dct = [
+            (t1n[0] - cos_phi * t0n[0]) / d0,
+            (t1n[1] - cos_phi * t0n[1]) / d0,
+            (t1n[2] - cos_phi * t0n[2]) / d0,
+            (t0n[0] - cos_phi * t1n[0]) / d1,
+            (t0n[1] - cos_phi * t1n[1]) / d1,
+            (t0n[2] - cos_phi * t1n[2]) / d1,
         ];
-        let dphi_dk = [
-            pp * dphi_di[0] - (qq + 1.0) * dphi_dl[0],
-            pp * dphi_di[1] - (qq + 1.0) * dphi_dl[1],
-            pp * dphi_di[2] - (qq + 1.0) * dphi_dl[2],
+        let gi = [
+            sin_term * (dct[2] * r1[1] - dct[1] * r1[2]),
+            sin_term * (dct[0] * r1[2] - dct[2] * r1[0]),
+            sin_term * (dct[1] * r1[0] - dct[0] * r1[1]),
+        ];
+        let gj = [
+            sin_term * (dct[1] * (r1[2] - r0[2]) + dct[2] * (r0[1] - r1[1]) - dct[4] * r3[2] + dct[5] * r3[1]),
+            sin_term * (dct[0] * (r0[2] - r1[2]) + dct[2] * (r1[0] - r0[0]) + dct[3] * r3[2] - dct[5] * r3[0]),
+            sin_term * (dct[0] * (r1[1] - r0[1]) + dct[1] * (r0[0] - r1[0]) - dct[3] * r3[1] + dct[4] * r3[0]),
+        ];
+        let gk = [
+            sin_term * (dct[1] * r0[2] - dct[2] * r0[1] + dct[4] * (r3[2] - r2[2]) + dct[5] * (r2[1] - r3[1])),
+            sin_term * (-dct[0] * r0[2] + dct[2] * r0[0] + dct[3] * (r2[2] - r3[2]) + dct[5] * (r3[0] - r2[0])),
+            sin_term * (dct[0] * r0[1] - dct[1] * r0[0] + dct[3] * (r3[1] - r2[1]) + dct[4] * (r2[0] - r3[0])),
+        ];
+        let gl = [
+            sin_term * (dct[4] * r2[2] - dct[5] * r2[1]),
+            sin_term * (dct[5] * r2[0] - dct[3] * r2[2]),
+            sin_term * (dct[3] * r2[1] - dct[4] * r2[0]),
         ];
         for c in 0..3 {
-            g[i * dim + c] += de_dphi * dphi_di[c];
-            g[j * dim + c] += de_dphi * dphi_dj[c];
-            g[k * dim + c] += de_dphi * dphi_dk[c];
-            g[l * dim + c] += de_dphi * dphi_dl[c];
+            g[i * dim + c] += gi[c];
+            g[j * dim + c] += gj[c];
+            g[k * dim + c] += gk[c];
+            g[l * dim + c] += gl[c];
         }
     }
     (e, g)
 }
 
-/// UFF out-of-plane / inversion term — the ETKDG Stage-C planarity contribution (`InversionContribs`,
-/// parameterized by RDKit's UFF inversion coefficients). Per contrib on atoms (i, j=center, k, l):
+/// UFF out-of-plane / inversion term, the Stage-C planarity contribution (RDKit
+/// `InversionContribs`). Per contrib on atoms (i, j=center, k, l):
 /// `E = fc·(C0 + C1·sinY + C2·cos2W)`, where `sinY` is the sine of the Wilson out-of-plane angle
-/// (`cosY = n̂·r̂JL`, `n̂ ⟂` the i-j-k plane) and `cos2W = 2·sinY² − 1`. Exact RDKit energy + analytic
-/// gradient. Coeffs (C0,C1,C2,fc — fc already ×10) come from the spec.
+/// (`cosY = n̂·r̂JL`, `n̂ ⟂` the i-j-k plane) and `cos2W = 2·sinY² − 1`. Coefficients come from
+/// `spec.impropers`.
+///
+/// Near-degenerate geometries (sinY→0 or sinθ→0) are handled as RDKit does — sinY and sinθ are
+/// floored at 1e-8 in the gradient and the large-but-finite value is kept, not skipped — so the
+/// force the minimizer follows matches RDKit's bit-for-bit even at singular conformers.
+/// Per-improper geometry shared by the energy and gradient: unit bond vectors from the center `j`,
+/// their lengths, and the out-of-plane angle `cosY`/`sin²Y`. `None` for a degenerate geometry (a
+/// zero-length bond or a collinear i-j-k giving a zero plane normal) that contributes nothing — the
+/// caller skips it, matching the original `continue`s.
+struct ImproperGeom {
+    rji: [f64; 3],
+    rjk: [f64; 3],
+    rjl: [f64; 3],
+    dji: f64,
+    djk: f64,
+    djl: f64,
+    cosy: f64,
+    siny_sq: f64,
+}
+
+#[inline]
+fn improper_geom(coords: &[f64], imp: &bb_core::Improper, dim: usize) -> Option<ImproperGeom> {
+    let (i, j, k, l) = (
+        imp.atoms[0] as usize,
+        imp.atoms[1] as usize,
+        imp.atoms[2] as usize,
+        imp.atoms[3] as usize,
+    );
+    let (p1, p2, p3, p4) = (
+        pt(coords, i, dim),
+        pt(coords, j, dim),
+        pt(coords, k, dim),
+        pt(coords, l, dim),
+    );
+    // bond vectors from the center j
+    let mut rji = subv(p1, p2);
+    let mut rjk = subv(p3, p2);
+    let mut rjl = subv(p4, p2);
+    let (dji, djk, djl) = (norm3(rji), norm3(rjk), norm3(rjl));
+    if dji < 1e-8 || djk < 1e-8 || djl < 1e-8 {
+        return None;
+    }
+    rji = scale3(rji, 1.0 / dji);
+    rjk = scale3(rjk, 1.0 / djk);
+    rjl = scale3(rjl, 1.0 / djl);
+    // plane normal n̂ = (-r̂JI) × r̂JK
+    let mut n = cross(scale3(rji, -1.0), rjk);
+    let nn = norm3(n);
+    if nn < 1e-8 {
+        return None;
+    }
+    n = scale3(n, 1.0 / nn);
+    let cosy = dot3(n, rjl).clamp(-1.0, 1.0);
+    let siny_sq = 1.0 - cosy * cosy;
+    Some(ImproperGeom { rji, rjk, rjl, dji, djk, djl, cosy, siny_sq })
+}
+
+/// Energy of one improper from its [`ImproperGeom`] (RDKit: `sinY = sqrt(sin²Y)` if `>0` else `0`).
+#[inline]
+fn improper_energy_one(imp: &bb_core::Improper, gm: &ImproperGeom) -> f64 {
+    let siny_e = if gm.siny_sq > 0.0 { gm.siny_sq.sqrt() } else { 0.0 };
+    let cos2w = 2.0 * siny_e * siny_e - 1.0;
+    imp.fc * (imp.c0 + imp.c1 * siny_e + imp.c2 * cos2w)
+}
+
+/// UFF improper (sp2 planarity) energy only — no gradient allocation. Used by the per-conformer
+/// planarity acceptance check ([`crate::checks::planarity_ok`]).
+pub fn improper_energy(spec: &MoleculeSpec, coords: &[f64], dim: usize) -> f64 {
+    let mut e = 0.0;
+    for imp in &spec.impropers {
+        if let Some(gm) = improper_geom(coords, imp, dim) {
+            e += improper_energy_one(imp, &gm);
+        }
+    }
+    e
+}
+
 pub fn improper_energy_grad(spec: &MoleculeSpec, coords: &[f64], dim: usize) -> (f64, Vec<f64>) {
     let mut e = 0.0;
     let mut g = vec![0.0f64; coords.len()];
     for imp in &spec.impropers {
+        let Some(gm) = improper_geom(coords, imp, dim) else {
+            continue;
+        };
         let (i, j, k, l) = (
             imp.atoms[0] as usize,
             imp.atoms[1] as usize,
             imp.atoms[2] as usize,
             imp.atoms[3] as usize,
         );
-        let (p1, p2, p3, p4) = (
-            pt(coords, i, dim),
-            pt(coords, j, dim),
-            pt(coords, k, dim),
-            pt(coords, l, dim),
-        );
-        // bond vectors from the center j
-        let mut rji = subv(p1, p2);
-        let mut rjk = subv(p3, p2);
-        let mut rjl = subv(p4, p2);
-        let (dji, djk, djl) = (norm3(rji), norm3(rjk), norm3(rjl));
-        if dji < 1e-8 || djk < 1e-8 || djl < 1e-8 {
-            continue;
-        }
-        rji = scale3(rji, 1.0 / dji);
-        rjk = scale3(rjk, 1.0 / djk);
-        rjl = scale3(rjl, 1.0 / djl);
-        // plane normal n̂ = (-r̂JI) × r̂JK
-        let mut n = cross(scale3(rji, -1.0), rjk);
-        let nn = norm3(n);
-        if nn < 1e-8 {
-            continue;
-        }
-        n = scale3(n, 1.0 / nn);
-        let cosy = dot3(n, rjl).clamp(-1.0, 1.0);
-        let siny_sq = 1.0 - cosy * cosy;
-        let (c0, c1, c2, fc) = (imp.c0 as f64, imp.c1 as f64, imp.c2 as f64, imp.fc as f64);
+        e += improper_energy_one(imp, &gm);
+        let ImproperGeom { rji, rjk, rjl, dji, djk, djl, cosy, siny_sq } = gm;
+        let (c1, c2, fc) = (imp.c1, imp.c2, imp.fc);
 
-        // energy (RDKit: sinY = sqrt(sinYSq) if >0 else 0)
-        let siny_e = if siny_sq > 0.0 { siny_sq.sqrt() } else { 0.0 };
-        let cos2w = 2.0 * siny_e * siny_e - 1.0;
-        e += fc * (c0 + c1 * siny_e + c2 * cos2w);
-
-        // gradient — skip near-degenerate geometries (collinear i-j-k → sinTheta²→0, or L along the
-        // plane normal → sinY→0), where the out-of-plane angle's gradient is singular and would blow
-        // up (to inf/NaN) and thrash the line search. Energy stays continuous; other terms move the
-        // atom off the singularity. (RDKit's own optimizer caps step size instead; equivalent under
-        // the loose ensemble bar.)
+        // gradient — near a singular geometry (L along the plane normal → sinY→0, or collinear
+        // i-j-k → sinTheta→0) RDKit does NOT skip: it floors sinY and sinTheta at 1e-8
+        // (`std::max(sqrt(...), 1e-8)` in InversionContribs::getGrad) and computes the large but
+        // finite gradient. We match that exactly — skipping produced up to rel~1.6 vs RDKit on
+        // pathological corpus conformers, and made native's minimizer follow a different gradient
+        // than RDKit's there.
         let cos_theta = dot3(rji, rjk).clamp(-1.0, 1.0);
         let sin_theta_sq = 1.0 - cos_theta * cos_theta;
-        if siny_sq < 1e-3 || sin_theta_sq < 1e-3 {
-            continue;
-        }
-        let siny = siny_sq.sqrt();
-        let sin_theta = sin_theta_sq.sqrt();
+        let siny = siny_sq.sqrt().max(1e-8);
+        let sin_theta = sin_theta_sq.sqrt().max(1e-8);
         let de_dw = -fc * (c1 * cosy + 4.0 * c2 * cosy * siny);
         let t1 = cross(rjl, rjk);
         let t2 = cross(rji, rjl);
@@ -379,12 +618,15 @@ pub struct DistConstraint {
 const KNOWN_DIST_TOL: f64 = 0.01;
 const KNOWN_DIST_FORCE_CONSTANT: f64 = 100.0;
 
-/// Build the Stage-C distance-constraint set, faithfully replaying RDKit `construct3DForceField`'s
-/// `add12Terms` + `add13Terms` + `addLongRangeDistanceConstraints`. Built **once** from the
-/// post-Stage-A `coords` (dim=3): 1-2 and 1-3 distances are pinned to the *current* geometry ±tol,
-/// everything else to the bounds matrix. `atomPairs` bookkeeping mirrors RDKit so no pair is
-/// double-constrained. (Impropers/`isImproperConstrained` and triple-bond angle constraints are not
-/// yet modelled — those 1-3s fall back to the current-distance pin, a small deviation.)
+/// Build the Stage-C constraint set from `coords` (dim 3, the post-Stage-A geometry). Each atom pair
+/// is constrained at most once, in this order (RDKit `construct3DForceField`):
+///
+/// - 1-4 pairs carrying an experimental torsion: no distance constraint (the torsion term covers them).
+/// - 1-2 pairs (`spec.bonds`): pinned to their current distance ±0.01 Å, force constant 100.
+/// - 1-3 pairs (`spec.angles`) marked `triple`: a 179–180° [`AngleConstraint`], force constant 1.
+/// - 1-3 pairs centered on an improper center: the bounds-matrix limits, force constant 100.
+/// - all other 1-3 pairs: pinned to their current distance ±0.01 Å, force constant 100.
+/// - every remaining pair: the bounds-matrix limits, force constant `bounds_force_scaling × 10`.
 pub fn build_stage_c_constraints(
     spec: &MoleculeSpec,
     coords: &[f64],
@@ -446,8 +688,8 @@ pub fn build_stage_c_constraints(
             cs.push(DistConstraint {
                 i,
                 j: k,
-                min_len: spec.lb(i, k) as f64,
-                max_len: spec.ub(i, k) as f64,
+                min_len: spec.lb64(i, k),
+                max_len: spec.ub64(i, k),
                 fc: KNOWN_DIST_FORCE_CONSTANT,
             });
         } else {
@@ -470,8 +712,8 @@ pub fn build_stage_c_constraints(
                 cs.push(DistConstraint {
                     i,
                     j,
-                    min_len: spec.lb(i, j) as f64,
-                    max_len: spec.ub(i, j) as f64,
+                    min_len: spec.lb64(i, j),
+                    max_len: spec.ub64(i, j),
                     fc: fc_long,
                 });
             }
@@ -503,7 +745,7 @@ fn accum_dist_constraint(c: &DistConstraint, coords: &[f64], e: &mut f64, g: &mu
     }
 }
 
-/// Energy + gradient of a Stage-C distance-constraint set (3D coords). Matches RDKit
+/// Energy + gradient of a Stage-C distance-constraint set (3D coords), RDKit
 /// `DistanceConstraintContribs`: `E = Σ 0.5·fc·diff²`, `grad = fc·(d−bound)/d·(p_i−p_j)`.
 pub fn dist_constraint_energy_grad(cs: &[DistConstraint], coords: &[f64]) -> (f64, Vec<f64>) {
     let mut e = 0.0;
@@ -515,7 +757,7 @@ pub fn dist_constraint_energy_grad(cs: &[DistConstraint], coords: &[f64]) -> (f6
 }
 
 /// Stage-C angle constraint: flat-bottom harmonic on the angle i-j-k (j central), in **degrees**.
-/// RDKit uses these only for near-linear geometries (triple bonds / allenes: 179–180°, fc 1).
+/// Built only for near-linear geometries (triple bonds, allenes).
 #[derive(Clone, Debug)]
 pub struct AngleConstraint {
     pub i: usize,
@@ -526,7 +768,7 @@ pub struct AngleConstraint {
     pub fc: f64,
 }
 
-/// Energy + gradient of Stage-C angle constraints (3D). Exact RDKit `AngleConstraintContribs`:
+/// Energy + gradient of Stage-C angle constraints (3D), RDKit `AngleConstraintContribs`:
 /// `E = Σ fc·angleTerm²` with `angleTerm` the degrees outside `[min,max]`.
 pub fn angle_constraint_energy_grad(cs: &[AngleConstraint], coords: &[f64]) -> (f64, Vec<f64>) {
     const RAD2DEG: f64 = 180.0 / std::f64::consts::PI;
@@ -563,9 +805,8 @@ pub fn angle_constraint_energy_grad(cs: &[AngleConstraint], coords: &[f64]) -> (
     (e, g)
 }
 
-/// Stage-C objective (3D): M6 torsions + UFF impropers + distance constraints (pre-built via
-/// [`build_stage_c_constraints`]). No chiral term (RDKit's Stage C has none). This is the full set
-/// of terms in RDKit's `construct3DForceField`.
+/// Stage-C objective (3D): M6 torsions + UFF impropers + the distance and angle constraints
+/// pre-built by [`build_stage_c_constraints`]. No chiral term.
 pub fn stage_c_energy_grad(
     spec: &MoleculeSpec,
     dist_c: &[DistConstraint],
@@ -625,6 +866,28 @@ mod tests {
         }
     }
 
+    // The hot path (minimizer) uses the pre-built-pair evals; the reject/certify path uses the basin
+    // scan. They MUST agree bit-for-bit or the ensembles the minimizer produces would diverge from the
+    // RDKit-certified gradient. Assert byte-identity of energy and every gradient component across both
+    // basin regimes (BASIN_ALL keeps all pairs; BASIN_DEFAULT exercises the filter), for Stage A and B.
+    #[test]
+    fn pair_eval_bit_identical_to_scan() {
+        let spec = synthetic_spec();
+        let dim = 4;
+        let x = coords(spec.n_atoms, dim, 0xC0FFEE);
+        for basin in [BASIN_ALL, BASIN_DEFAULT] {
+            let pairs = build_dist_pairs(&spec, basin);
+            let (ea, ga) = stage_a_energy_grad(&spec, &x, dim, basin);
+            let (ep, gp) = stage_a_energy_grad_pairs(&spec, &x, dim, &pairs);
+            assert_eq!(ea.to_bits(), ep.to_bits(), "Stage-A energy differs (basin {basin})");
+            assert_eq!(ga, gp, "Stage-A gradient differs (basin {basin})");
+            let (eb, gb) = stage_b_energy_grad(&spec, &x, dim, basin);
+            let (ebp, gbp) = stage_b_energy_grad_pairs(&spec, &x, dim, &pairs);
+            assert_eq!(eb.to_bits(), ebp.to_bits(), "Stage-B energy differs (basin {basin})");
+            assert_eq!(gb, gbp, "Stage-B gradient differs (basin {basin})");
+        }
+    }
+
     #[test]
     fn gradient_matches_finite_difference() {
         let spec = synthetic_spec();
@@ -659,9 +922,16 @@ mod tests {
             bounds: vec![0.0f32; 16],
             chiral_sets: vec![],
             tetrahedral_centers: vec![],
+            // Only the m=1..4 force constants are exercised here: RDKit's analytic gradient is
+            // deliberately inconsistent with its own energy for the higher terms — the m=6 term
+            // reuses forceConstants[4]/signs[4] (not [5]) and drops a cosφ factor (6·sinφ, not
+            // 6·cosφ·sinφ), and there is no gradient term reading forceConstants[5] at all. We
+            // replicate that quirk for bit-exact parity, so `gradient == d(energy)/dx` can only hold
+            // where V[4]=V[5]=0. The full six-term gradient (quirk included) is validated directly
+            // against RDKit's TorsionAngleContribs in bb-rdkit/tests/ff_parity.rs (rel < 1e-5).
             exp_torsions: vec![ExpTorsion {
                 atoms: [0, 1, 2, 3],
-                v: [1.0, 0.5, 0.3, 0.2, 0.1, 0.05],
+                v: [1.0, 0.5, 0.3, 0.2, 0.0, 0.0],
                 signs: [1, -1, 1, -1, 1, -1],
             }],
             ..Default::default()

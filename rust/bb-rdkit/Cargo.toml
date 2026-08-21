@@ -16,6 +16,12 @@ links = "rdkitpatched"
 [dependencies]
 cxx = "1"
 bb-core = { path = "../bb-core" }
+# bb-spec (native spec) + bb-embed (native force field) are used by the fixture generator bin
+# (src/bin/gen_fixtures.rs) and by the parity tests. Neither depends on bb-rdkit, so there is no
+# cycle (bb-embed is the RDKit-free pipeline; bb-spec depends only on core/perceive/bounds).
+bb-spec = { path = "../bb-spec" }
+bb-embed = { path = "../bb-embed" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
 
@@ -23,11 +29,31 @@ thiserror = "2"
 cxx-build = "1"
 
 [dev-dependencies]
-bb-embed = { path = "../bb-embed" }
+rand = "0.8"
+
+[[bin]]
+name = "gen-fixtures"
+path = "src/bin/gen_fixtures.rs"
 
 [[bin]]
 name = "bb-spec"
 path = "src/bin/spec.rs"
+
+[[bin]]
+name = "bb-spec-batch"
+path = "src/bin/spec_batch.rs"
+
+[[bin]]
+name = "bb-raw-bounds-batch"
+path = "src/bin/raw_bounds_batch.rs"
+
+[[bin]]
+name = "bb-uff-dump"
+path = "src/bin/uff_dump.rs"
+
+[[bin]]
+name = "bb-aromaticity-dump"
+path = "src/bin/aromaticity_dump.rs"
 
 [lints]
 workspace = true

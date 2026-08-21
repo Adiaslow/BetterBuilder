@@ -1,0 +1,16 @@
+source      RDKit's raw (pre-triangleSmooth) bounds matrix with only 1-2 bounds and van der Waals
+            lower bounds set: setTopolBounds(mol, mat, set15=false, scaleVDW=false,
+            useMacrocycle14config=true, forceTransAmides=true, set14=false, set13=false), i.e.
+            set12Bounds + setLowerBoundVDW only. Captured through bb-rdkit's cxx bridge
+            (bb-rdkit::raw_bounds_stage -> bb::raw_bounds_stage in bridge.cc) on the post-AddHs
+            molecule; the bridge runs RDKit's routines and copies the matrix.
+purpose     gate for the pure-Rust set12 + setLowerBoundVDW port (bb_bounds::bounds), the first two
+            layers of the setTopolBounds port, in isolation from the 1-3/1-4/1-5 layers. Match is
+            bit-exact (worst |delta| 0.0 over 4,016,579 matrix cells across 600 molecules).
+format      gzipped JSONL, one object per corpus line:
+            {"name": <id>, "bounds12": [<n*n row-major f64 in RDKit BoundsMatrix layout: for i<j the
+            upper bound at [i*n+j], the lower bound at [j*n+i]; diagonal 0>]}
+            A SMILES RDKit cannot parse is {"name": <id>, "error": "unparseable"}.
+corpus      first 600 of validation/seeds_5000.smi (same molecule set as raw_bounds_seeds600)
+indices     post-AddHs atom order (RDKit SmilesToMol + addHs)
+generated   2026-08-14

@@ -1,0 +1,38 @@
+[package]
+name = "bb-output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bb-core = { path = "../bb-core" }
+bb-db2 = { path = "../bb-db2" }
+bb-perceive = { path = "../bb-perceive" }
+bb-spec = { path = "../bb-spec" }
+bb-embed = { path = "../bb-embed" }
+bb-strain = { path = "../bb-strain" }
+bb-solv = { path = "../bb-solv" }
+tar = "0.4"
+flate2 = "1"
+
+[dev-dependencies]
+# Gate-only: load the container-dumped oracle JSON (input + every hierarchy internal). Production
+# feeds the builder from our own pipeline, never JSON, so this stays a dev/test dependency.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# the tarball gate extracts and inspects members
+tar = "0.4"
+flate2 = "1"
+
+[[bin]]
+name = "bb-build"
+path = "src/bin/build.rs"
+
+[[bin]]
+name = "bb-emit-inputs"
+path = "src/bin/emit_inputs.rs"
+
+[lints]
+workspace = true

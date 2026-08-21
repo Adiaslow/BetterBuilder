@@ -28,3 +28,21 @@ __pycache__/
 
 # NOTE: Cargo.lock IS tracked (this workspace ships binaries — reproducible builds).
 # NOTE: validation/reference/*.sdf ARE tracked (oracle reference ensembles the guard needs).
+
+# certify tier build artifacts (dumpers compiled against her container libs)
+validation/certify/.build/
+
+# Divya reference ensembles: ~138MB, byte-deterministic → regenerated on demand, never committed
+validation/fixtures/divya/ensembles/
+validation/fixtures/divya/.build/
+
+# Divergence-hunt generated corpus: deterministic from seed → regenerated on demand, never committed
+validation/hunt/generated*.smi
+# Second-seed-base ensembles (derived band) + transient analysis artifacts
+validation/fixtures/divya/ensembles_base2/
+validation/parity/derived_band.json
+validation/parity/tfd_diag*.json
+validation/parity/strain_compare.json
+validation/parity/bounds_strain.json
+validation/parity/_spec_tmp.json
+validation/db2/.corpus_gate/

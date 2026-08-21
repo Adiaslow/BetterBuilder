@@ -1,0 +1,7 @@
+source      RDKit's DGeomHelpers::collectBondsAndAngles, called through bb-rdkit's cxx bridge
+            (bridge.cc) and read out of the emitted MoleculeSpec. Not exposed to RDKit's Python
+            API, so the bridge is the only route; the bridge calls the function and copies the
+            result rather than computing anything itself.
+corpus      first 600 of validation/seeds_5000.smi
+indices     post-AddHs atom order
+generated   2026-08-14

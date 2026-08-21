@@ -1,7 +1,7 @@
-//! bb-spec — SMILES → MoleculeSpec JSON (on the patched RDKit, pure Rust FFI). Pipe into bb-embed.
+//! bb-spec — SMILES → MoleculeSpec JSON on stdout. Exit 2 on missing argument, 1 on a SMILES the
+//! patched RDKit cannot parse.
 //!
 //!   bb-spec "<smiles>" > spec.json
-//! (the RDKit dylib path is baked via rpath at build time, so it usually just runs.)
 
 use std::process::ExitCode;
 

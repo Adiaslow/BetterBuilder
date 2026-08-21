@@ -1,8 +1,6 @@
-//! Python bindings for BetterBuilder — a maximally thin PyO3 wrapper over the Rust backend.
-//!
-//! All work happens in Rust: [`bb_rdkit::build_spec`] extracts the distance-geometry problem from a
-//! SMILES (patched-RDKit FFI), and [`bb_embed::embed_recipe`] runs the faithful ETKDG core-pin recipe.
-//! Python calls one function:
+//! Python bindings for BetterBuilder — a PyO3 wrapper over [`bb_spec::build_native`] (SMILES →
+//! distance-geometry problem, RDKit-free) and [`bb_embed::embed_recipe`] (the ETKDG core-pin
+//! recipe), exposed as one function:
 //!
 //! ```python
 //! import betterbuilder
@@ -39,14 +37,14 @@ impl Conformers {
     }
 }
 
-/// Embed a SMILES into a conformer ensemble via the faithful ETKDG two-stage core-pin recipe (the
-/// conformer count is chosen by the recipe from the molecule's rotatable bonds, matching the oracle).
+/// Embed a SMILES into a conformer ensemble via the ETKDG two-stage core-pin recipe. The conformer
+/// count comes from the recipe counts in the spec, not from a caller argument.
 ///
-/// Raises `ValueError` if RDKit cannot parse the SMILES.
+/// Raises `ValueError` if the SMILES cannot be parsed.
 #[pyfunction]
 #[pyo3(signature = (smiles, seed = 210185))]
 fn embed(smiles: &str, seed: u64) -> PyResult<Conformers> {
-    let spec = bb_rdkit::build_spec(smiles).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let spec = bb_spec::build_native(smiles).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let confs = bb_embed::embed_recipe(&spec, seed);
     Ok(Conformers {
         n_atoms: spec.n_atoms,
@@ -54,7 +52,7 @@ fn embed(smiles: &str, seed: u64) -> PyResult<Conformers> {
     })
 }
 
-/// BetterBuilder — fast, faithful macrocycle conformer generation with a Rust backend.
+/// BetterBuilder — macrocycle conformer generation.
 #[pymodule]
 fn betterbuilder(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embed, m)?)?;

@@ -1,6 +1,5 @@
-//! Staged minimization via argmin's L-BFGS (best-in-class Rust optimizer). We supply the ETKDG
-//! energy + gradient for each stage; argmin drives the descent. (RDKit uses BFGS; the loose
-//! ensemble bar makes the exact optimizer immaterial.)
+//! Staged minimization: argmin L-BFGS (MoreThuente line search) over the Stage-A/B/C objectives
+//! from [`crate::forcefield`].
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -11,14 +10,12 @@ use argmin::solver::quasinewton::LBFGS;
 use bb_core::MoleculeSpec;
 
 use crate::forcefield::{
-    stage_a_energy_grad, stage_b_energy_grad, stage_c_energy_grad, AngleConstraint, DistConstraint,
+    build_dist_pairs, stage_a_energy_grad_pairs, stage_b_energy_grad_pairs, stage_c_energy_grad,
+    AngleConstraint, DistConstraint, DistPair,
 };
 
-/// L-BFGS gradient-norm convergence tolerance (argmin `tolerance_grad`, raw gradient L2 norm). RDKit
-/// minimizes to a *scaled* force tolerance of 1e-3 and stops when converged; argmin's default (~1.5e-8)
-/// never triggers, so we'd otherwise burn every iteration far below the ensemble noise floor. Tuned by
-/// a tolerance × RMSD sweep: `1e-2` leaves the 100-mol ensemble metrics unchanged while cutting embed
-/// time ~2.5× vs 1e-3 (looser 3e-2 starts to wobble per-molecule). Override with `BB_GRAD_TOL`.
+/// L-BFGS convergence tolerance on the raw gradient L2 norm (argmin `tolerance_grad`). Read once
+/// from `BB_GRAD_TOL` if set, otherwise this default.
 const GRAD_TOL_DEFAULT: f64 = 1e-2;
 fn grad_tol() -> f64 {
     static T: OnceLock<f64> = OnceLock::new();
@@ -30,8 +27,8 @@ fn grad_tol() -> f64 {
     })
 }
 
-/// Zero the gradient of pinned (fixed) atoms so the optimizer never moves them — the candidate's
-/// analog of RDKit's `field->fixedPoints()`. `fixed` is empty (no pins) or length `n_atoms`.
+/// Zero the gradient of fixed atoms so the optimizer does not move them. `fixed` is empty (no fixed
+/// atoms) or length `n_atoms`.
 #[inline]
 fn zero_fixed(g: &mut [f64], fixed: &[bool], dim: usize) {
     for (a, &f) in fixed.iter().enumerate() {
@@ -60,26 +57,39 @@ enum Stage<'a> {
 /// Memoized `(evaluated point, energy, gradient)` for one force-field evaluation.
 type EvalCache = Option<(Vec<f64>, f64, Vec<f64>)>;
 
-/// One minimization problem for argmin. Computes energy **and** gradient together and memoizes the
-/// last evaluated point — MoreThuente evaluates `cost(x)` and `gradient(x)` at the same `x`, and each
-/// would otherwise recompute the full O(N²) field; the cache makes the second call free.
+/// One minimization problem for argmin. Computes energy and gradient together and memoizes the last
+/// evaluated point, so `cost(x)` and `gradient(x)` at the same `x` evaluate the field once. For
+/// Stage A/B the basin-surviving distance pairs are pre-built once here (constant across the whole
+/// minimization) instead of re-scanning all n²/2 pairs per eval.
 struct Problem<'a> {
     spec: &'a MoleculeSpec,
     dim: usize,
     fixed: &'a [bool],
     stage: Stage<'a>,
+    dist_pairs: Vec<DistPair>, // basin-surviving pairs for Stage A/B; empty for Stage C
     cache: RefCell<EvalCache>,
 }
 
 impl<'a> Problem<'a> {
     fn new(spec: &'a MoleculeSpec, dim: usize, fixed: &'a [bool], stage: Stage<'a>) -> Self {
-        Problem { spec, dim, fixed, stage, cache: RefCell::new(None) }
+        let dist_pairs = match &stage {
+            Stage::A { basin } | Stage::B { basin } => build_dist_pairs(spec, *basin),
+            Stage::C { .. } => Vec::new(),
+        };
+        Problem {
+            spec,
+            dim,
+            fixed,
+            stage,
+            dist_pairs,
+            cache: RefCell::new(None),
+        }
     }
 
     fn compute(&self, p: &[f64]) -> (f64, Vec<f64>) {
         let (e, mut g) = match &self.stage {
-            Stage::A { basin } => stage_a_energy_grad(self.spec, p, self.dim, *basin),
-            Stage::B { basin } => stage_b_energy_grad(self.spec, p, self.dim, *basin),
+            Stage::A { .. } => stage_a_energy_grad_pairs(self.spec, p, self.dim, &self.dist_pairs),
+            Stage::B { .. } => stage_b_energy_grad_pairs(self.spec, p, self.dim, &self.dist_pairs),
             Stage::C { dist_c, angle_c } => stage_c_energy_grad(self.spec, dist_c, angle_c, p),
         };
         zero_fixed(&mut g, self.fixed, self.dim);
@@ -115,7 +125,7 @@ impl Gradient for Problem<'_> {
 }
 
 /// Run L-BFGS (MoreThuente line search) on a staged [`Problem`] from `init`; returns the minimized
-/// coordinates (the init unchanged on the rare optimizer failure, e.g. a line-search stall).
+/// coordinates, or `init` unchanged if the optimizer returns an error.
 fn run_min(problem: Problem, init: Vec<f64>, max_iters: u64) -> Vec<f64> {
     let solver = LBFGS::new(MoreThuenteLineSearch::new(), 7)
         .with_tolerance_grad(grad_tol())
@@ -130,7 +140,7 @@ fn run_min(problem: Problem, init: Vec<f64>, max_iters: u64) -> Vec<f64> {
 }
 
 /// Minimize the Stage-A objective from `init` (`n_atoms*dim` coords). `fixed` (empty or length
-/// `n_atoms`) marks pinned atoms held frozen.
+/// `n_atoms`) marks atoms held in place.
 pub fn minimize_stage_a(
     spec: &MoleculeSpec,
     init: Vec<f64>,
@@ -139,10 +149,14 @@ pub fn minimize_stage_a(
     basin: f64,
     max_iters: u64,
 ) -> Vec<f64> {
-    run_min(Problem::new(spec, dim, fixed, Stage::A { basin }), init, max_iters)
+    run_min(
+        Problem::new(spec, dim, fixed, Stage::A { basin }),
+        init,
+        max_iters,
+    )
 }
 
-/// Minimize the Stage-B objective (4D 4th-dim squeeze) from `init`. `fixed` marks pinned atoms.
+/// Minimize the Stage-B objective (4D 4th-dim squeeze) from `init`. `fixed` marks atoms held in place.
 pub fn minimize_stage_b(
     spec: &MoleculeSpec,
     init: Vec<f64>,
@@ -151,11 +165,15 @@ pub fn minimize_stage_b(
     basin: f64,
     max_iters: u64,
 ) -> Vec<f64> {
-    run_min(Problem::new(spec, dim, fixed, Stage::B { basin }), init, max_iters)
+    run_min(
+        Problem::new(spec, dim, fixed, Stage::B { basin }),
+        init,
+        max_iters,
+    )
 }
 
 /// Minimize the Stage-C objective (3D) from `init`, using constraints pre-built from `init`'s
-/// geometry (see [`crate::forcefield::build_stage_c_constraints`]). `fixed` marks pinned atoms.
+/// geometry (see [`crate::forcefield::build_stage_c_constraints`]). `fixed` marks atoms held in place.
 pub fn minimize_stage_c(
     spec: &MoleculeSpec,
     dist_c: &[DistConstraint],
@@ -164,7 +182,11 @@ pub fn minimize_stage_c(
     fixed: &[bool],
     max_iters: u64,
 ) -> Vec<f64> {
-    run_min(Problem::new(spec, 3, fixed, Stage::C { dist_c, angle_c }), init, max_iters)
+    run_min(
+        Problem::new(spec, 3, fixed, Stage::C { dist_c, angle_c }),
+        init,
+        max_iters,
+    )
 }
 
 #[cfg(test)]

@@ -1,0 +1,16 @@
+[package]
+name = "bb-db2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "bb-db2-roundtrip"
+path = "src/bin/roundtrip.rs"
+
+[lints]
+workspace = true

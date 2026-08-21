@@ -1,0 +1,26 @@
+[package]
+name = "bb-solv"
+description = "Solvation: conformer coordinates -> MOPAC Z-matrix -> AMSOL7.1 input, invocation, and the .solv output the DOCK pipeline consumes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+bb-core = { path = "../bb-core" }
+mendeleev = { version = "0.8.4", default-features = false, features = ["element_list", "symbol"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bb-solvate"
+path = "src/bin/solvate.rs"

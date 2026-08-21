@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["bb-core", "bb-embed", "bb-rdkit", "bb-py"]
+members = ["bb-core", "bb-embed", "bb-rdkit", "bb-solv", "bb-py", "bb-perceive", "bb-bounds", "bb-spec", "bb-db2", "bb-output", "bb-strain"]
 # bb-py is a PyO3 extension module — built by maturin (which sets the macOS dynamic-lookup link args),
 # not by a plain `cargo build`. Excluded from the default build so the engine/guard build is unaffected.
-default-members = ["bb-core", "bb-embed", "bb-rdkit"]
+default-members = ["bb-core", "bb-embed", "bb-rdkit", "bb-solv", "bb-perceive", "bb-bounds", "bb-spec", "bb-db2", "bb-output", "bb-strain"]
 
 [workspace.package]
 version = "0.1.0"

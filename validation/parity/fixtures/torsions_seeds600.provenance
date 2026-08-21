@@ -1,0 +1,10 @@
+source      RDKit's ForceFields::CrystalFF::getExperimentalTorsions (patched build), read through
+            bb-rdkit's cxx bridge. Not exposed to RDKit's Python API in the form the engine uses:
+            GetExperimentalTorsions returns only SMARTS-matched library torsions, while the bridge
+            reads CrystalFFDetails, which also carries basic-knowledge planarity terms and the
+            improperAtoms list. The bridge calls the function and copies its results.
+patch       force constants 80.0 and 130.9 are Divya's amide reweighting; see
+            rdkit-patch/divya_amide_torsions.diff
+corpus      first 600 of validation/seeds_5000.smi
+indices     post-AddHs atom order
+generated   2026-08-14

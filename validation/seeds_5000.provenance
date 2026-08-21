@@ -1,0 +1,6 @@
+source      /wynton/group/bks/work/kholland/resampled_synthMC_fp_lib/9M_macrocycle_seeds.smi
+owner       kholland (bks), read-only; 824816356 bytes, 9000000 lines, mtime 2026-08-03 17:07
+sampling    awk 'NR%1800==0'  — systematic 1-in-1800 across the whole file, single pass
+pulled      2026-08-12 by ssh wynton
+format      2 columns, tab-separated: <smiles>\t<name>.  NOT protomers; no protomer id column.
+md5         cee35f8b6233f0b9ef80b91ea11c403b
