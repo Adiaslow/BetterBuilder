@@ -1,5 +1,6 @@
 [package]
 name = "bb-perceive"
+description = "Molecular perception in Rust reproducing RDKit's: SMILES parsing, rings, aromaticity, valence, hydrogens, stereo, SMARTS matching, and experimental torsions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

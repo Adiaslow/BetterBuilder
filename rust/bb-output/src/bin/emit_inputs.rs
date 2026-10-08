@@ -2,23 +2,22 @@
 //! native's own db2, so the corpus-scale writer gate can feed the SAME (mol2, solv) to the container's
 //! `mol2db2.py` and byte-diff its db2 against native's. Stage-isolated: identical input to both writers.
 //!
-//!   bb-emit-inputs <smiles> <name> <outdir> [seed]
-//!   → <outdir>/<name>.mol2   (native charge-bearing mol2, `-m` for mol2db2.py)
-//!     <outdir>/<name>.solv   (native rendered .solv, `-s` for mol2db2.py)
-//!     <outdir>/<name>.native.db2  (native writer output, the comparison target)
+//! ```text
+//! bb-emit-inputs <smiles> <name> <outdir> [seed]
+//! → <outdir>/<name>.solv           (native rendered .solv, `-s` for mol2db2.py)
+//!   <outdir>/<name>.b<k>.mol2        (block k's native charge-bearing mol2, `-m` for mol2db2.py)
+//!   <outdir>/<name>.b<k>.native.db2  (block k's native writer output, the comparison target)
+//! ```
 //! Exit 0 on success, 1 on any pipeline error (skipped molecules are the caller's to note).
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn run(smiles: &str, name: &str, outdir: &Path, seed: u64) -> Result<(), String> {
     let (spec, p) = bb_spec::build_native_perceived(smiles)?;
-    let raw = bb_embed::embed_recipe(&spec, seed);
-    if raw.is_empty() {
-        return Err("no conformers embedded".into());
-    }
-    let confs = bb_output::assemble::confs_from_embed(&raw, spec.n_atoms);
+    let blocks = bb_embed::embed_recipe(&spec, seed).map_err(|e| e.to_string())?;
+    let confs = bb_output::assemble::confs_from_blocks(&blocks, spec.n_atoms);
     let workdir = outdir.join(format!("{name}.amsol"));
-    let mut solv = bb_output::solvation::solvate(&spec, &raw[0].coords, &workdir)?;
+    let mut solv = bb_output::solvation::solvate(&spec, &blocks[0].conformers[0].coords, &workdir)?;
     if solv.atoms.len() != spec.n_atoms {
         return Err(format!("solv atoms {} != {}", solv.atoms.len(), spec.n_atoms));
     }
@@ -32,8 +31,8 @@ fn run(smiles: &str, name: &str, outdir: &Path, seed: u64) -> Result<(), String>
     let charges: Vec<f64> = solv.atoms.iter().map(|a| a.charge).collect();
     std::fs::write(outdir.join(format!("{name}.solv")), solv.render()).map_err(|e| e.to_string())?;
 
-    // Per block (same chunking as production), emit each block's mol2 (her mol2db2 input) + native db2.
-    bb_output::assemble::for_each_block(&mol, spec.sidechain_confs as usize, |b, bmol| {
+    // Per block (the same blocks as production), emit each block's mol2 (her mol2db2 input) + native db2.
+    bb_output::assemble::for_each_block(&mol, &bb_output::assemble::block_lens(&blocks), |b, bmol| {
         let bdb2 = bb_db2::write_entry(&bb_output::build(bmol, &solv)?);
         let bmol2 = bb_output::write_mol2_all(bmol, &charges);
         std::fs::write(outdir.join(format!("{name}.b{b}.mol2")), bmol2).map_err(|e| e.to_string())?;

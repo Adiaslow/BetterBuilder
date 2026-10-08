@@ -220,14 +220,14 @@ fn main() {
             continue;
         }
         let n = spec.n_atoms;
-        let confs = bb_embed::embed(&spec, 1, 0xC0FFEE ^ i as u64);
-        let conf = match confs.first() {
-            Some(c) if c.coords.len() == n * 3 => &c.coords,
-            _ => {
+        let confs = match bb_embed::embed(&spec, 1, 0xC0FFEE ^ i as u64) {
+            Ok(confs) => confs,
+            Err(_) => {
                 cmfail += 1;
                 continue;
             }
         };
+        let conf = &confs[0].coords;
         let (mut idx, mut xyz) = (Vec::new(), Vec::new());
         let mut coords: Vec<f64> = vec![spec.pin_atoms.len() as f64];
         for &a in &spec.pin_atoms {

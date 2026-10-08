@@ -32,11 +32,13 @@ fn embed_does_not_collapse() {
             Err(_) => continue,
         };
         let need = spec.n_atoms * 3;
-        let confs = bb_embed::embed(&spec, N_CONF, 0x5EED_0000 ^ i as u64);
-        let ok = confs.iter().filter(|c| c.coords.len() == need).count();
-        total += confs.len();
+        let ok = match bb_embed::embed(&spec, N_CONF, 0x5EED_0000 ^ i as u64) {
+            Ok(confs) => confs.iter().filter(|c| c.coords.len() == need).count(),
+            Err(shortfall) => shortfall.embedded,
+        };
+        total += N_CONF;
         nonempty += ok;
-        println!("  {ok}/{} non-empty (n={}) {}", confs.len(), spec.n_atoms, &smi[..smi.len().min(48)]);
+        println!("  {ok}/{N_CONF} non-empty (n={}) {}", spec.n_atoms, &smi[..smi.len().min(48)]);
         if ok == 0 {
             zero_yield.push((*smi).to_string());
         }

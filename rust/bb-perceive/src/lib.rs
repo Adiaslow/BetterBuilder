@@ -1,7 +1,11 @@
 
-//! SMILES ingestion in Rust: parse to a heavy-atom graph via yowl.
+//! Molecular perception in Rust, reproducing RDKit's: SMILES parsing, rings ([`rings`], [`sssr`]),
+//! aromaticity, valence and hydrogens ([`valence`], [`hydrogens`], [`addhs`]), hybridization,
+//! chirality and double-bond stereo, SMARTS matching ([`smarts`], [`smarts_match`], [`vf2`]), and the
+//! experimental-torsion library ([`torsions`]) — each gated against RDKit.
 //!
-//! This carries only what the SMILES states — element, charge, bracket hydrogen count, bond order,
+//! The crate root holds the parse: SMILES to a heavy-atom graph via yowl. It carries only what the
+//! SMILES states — element, charge, bracket hydrogen count, bond order,
 //! and aromaticity as written. Perceived aromaticity, implicit valence and hydrogen addition follow
 //! RDKit's own algorithms and are not part of the parse.
 

@@ -1,10 +1,12 @@
 //! Full pipeline, RDKit-free, with real AMSOL charges: SMILES → perceive → conformers → solvate
-//! (AMSOL) → SYBYL type + strain → `TypedMol` → mol2 + db2 → tarball. Needs the AMSOL toolchain; the
-//! test points `bb-solv` at it (skipping if it isn't present, so the suite stays portable).
+//! (AMSOL) → SYBYL type + strain → `TypedMol` → mol2 + db2 → tarball. Needs the AMSOL toolchain, so it
+//! is ignored by default — reported as skipped, never as passed — and runs with `--ignored` where AMSOL
+//! exists (`rust/gates.sh dbgate`); run that way without AMSOL, it fails and says so.
 
 use std::path::Path;
 
-/// Toolchain AMSOL on this machine; `None` elsewhere → the test skips.
+/// Point `bb-solv` at AMSOL: `BB_AMSOL_EXE` if set, else the toolchain AMSOL on Wynton. `false` when
+/// neither exists.
 fn setup_amsol() -> bool {
     if std::env::var_os("BB_AMSOL_EXE").is_some() {
         return true;
@@ -20,15 +22,13 @@ fn setup_amsol() -> bool {
 }
 
 #[test]
+#[ignore = "needs AMSOL (BB_AMSOL_EXE, or the Wynton toolchain); run with --ignored, as rust/gates.sh dbgate does"]
 fn smiles_to_tarball_with_amsol_charges() {
-    if !setup_amsol() {
-        eprintln!("AMSOL not available; skipping full-pipeline test");
-        return;
-    }
+    assert!(setup_amsol(), "AMSOL not found: set BB_AMSOL_EXE (and BB_AMSOL_LD_LIBRARY_PATH)");
     // `build_tarball_from_smiles` names the member `{name}.{prot_id}.{C}` with prot_id=0, so `name`
     // must be the BARE molecule name (not "benzoic.0" — that would double the prot id to benzoic.0.0.N).
     let workdir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("benzoic");
-    let bytes = bb_output::assemble::build_tarball_from_smiles("benzoic", "OC(=O)c1ccccc1", 0xBEEF, &workdir)
+    let bytes = bb_output::assemble::build_tarball_from_smiles(&bb_output::MoleculeName::new("benzoic").unwrap(), "OC(=O)c1ccccc1", 0xBEEF, &workdir)
         .expect("build tarball with AMSOL charges");
 
     // extract and check both members exist and the mol2 carries real (non-zero) charges

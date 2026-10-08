@@ -104,6 +104,12 @@ Measured on the production seed sample: `seeds_5000.smi` for the recipe check, `
 patch coverage) for perception, and traced subsets of 25 and 12 (88% patch coverage) for pins and
 ensembles.
 
+Rows 0–4 were measured before the 2026-10 changes. Stage 3 needs re-measurement: the recipe now
+replaces a core that cannot hold its sidechains and gives each embed RDKit's attempt budget (10 × atom
+count). The one perception change of that round (no double-bond stereo in rings under 8 atoms, as
+RDKit) disagrees with the previous behaviour on none of the 6,000 corpus molecules, which have no such
+ring. Rows 5 and 6 were run on 2026-10-07.
+
 | Stage | Scope | Result |
 |---|---|---|
 | 0. Ring perception (Rust) | 5000 molecules | **exact** — every ring identical to RDKit's symmetrized SSSR |
@@ -118,7 +124,8 @@ ensembles.
 | 2. Pinned atoms | 36 molecules, both branches | exact — pin sets identical, and constant across each molecule's core seeds |
 | 3. Conformer ensembles | 23 of 25 molecules | NN 1.03x the oracle's own seed-to-seed spread; within-seed diversity 1.04x, between-seed 1.08x |
 | 4. Solvation | 24 molecules | **byte-identical** `.solv` given her geometry |
-| 5. Strain, 6. db2 | — | not built |
+| 5. Strain | 9 molecules | total and max strain within 1e-3 of her `Torsion_Strain`, given her geometry (`bb-strain` gate) |
+| 6. db2 | 13 references | **byte-identical** db2 and identical hierarchy internals given her molecule and solvation; mol2 byte-identical on the 9 single-conformation ones (`bb-output` gate) |
 
 Ring perception is the first piece of the Rust front-end (`bb-perceive`, parsing via `yowl`), and it
 reproduces RDKit's symmetrized SSSR exactly on the corpus. Getting there required the traversal, not
@@ -145,8 +152,8 @@ predicate needs.
 
 Stage 1 compares `bb-spec` against RDKit's Python API, and `bb-spec` reaches RDKit through the cxx
 bridge — so it establishes that the bridge forwards RDKit's values, including the patched amide
-torsions, on chemistry where they fire. It is not a fidelity gate for a Rust reimplementation of
-perception; that implementation exists only for ring perception so far.
+torsions, on chemistry where they fire. It is not a fidelity gate for the Rust reimplementation of
+perception; that is the stage-0 rows and `rust/gates.sh`.
 
 Stages 2 and 3 read values out of live frames of her `build_ligands.py` executing. Stage 1 cannot:
 the bounds matrix is built inside `EmbedMolecule` in C++ and never reaches a Python frame. It is
@@ -157,7 +164,7 @@ assignments at `build_ligands.py:474-475` are redundant, and her sidechain embed
 `useMacrocycleTorsions` does not change its configuration. Re-check this if either side changes.
 
 Stage 4 feeds `bb-solv` the geometry she actually gave AMSOL (`3d/<name>.mol2`, the file her run
-moves out of `solv/`) rather than a conformer of ours. Her solvation embed at `build_ligands.py:112`
+moves out of `solv/`) rather than a conformer of ours. Her solvation embed at `build_ligands.py:191`
 is unseeded, so an end-to-end comparison would be distributional; fixing the geometry makes the
 chain deterministic and attributes any difference to us. What it therefore covers is Z-matrix
 construction, AMSOL input generation, invocation and output parsing — not the choice of conformer

@@ -62,17 +62,19 @@ mod tests {
     fn ring_takes_the_shorter_arc() {
         // a 4-ring 0-1-2-3-0: opposite atoms are 2 bonds apart either way
         let d = distance_matrix(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
-        assert_eq!(d[0 * 4 + 2], 2.0);
-        assert_eq!(d[1 * 4 + 3], 2.0);
-        assert_eq!(d[0 * 4 + 1], 1.0);
+        let at = |i: usize, j: usize| d[i * 4 + j];
+        assert_eq!(at(0, 2), 2.0);
+        assert_eq!(at(1, 3), 2.0);
+        assert_eq!(at(0, 1), 1.0);
     }
 
     #[test]
     fn disconnected_pairs_stay_local_inf() {
         // two separate fragments 0-1 and 2-3 (as in a salt written with '.')
         let d = distance_matrix(4, &[(0, 1), (2, 3)]);
-        assert_eq!(d[0 * 4 + 1], 1.0);
-        assert_eq!(d[0 * 4 + 2], LOCAL_INF);
-        assert_eq!(d[1 * 4 + 3], LOCAL_INF);
+        let at = |i: usize, j: usize| d[i * 4 + j];
+        assert_eq!(at(0, 1), 1.0);
+        assert_eq!(at(0, 2), LOCAL_INF);
+        assert_eq!(at(1, 3), LOCAL_INF);
     }
 }

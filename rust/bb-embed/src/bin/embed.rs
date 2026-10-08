@@ -1,7 +1,7 @@
 //! bb-embed — MoleculeSpec JSON (stdin or file) → conformer coords JSON (stdout).
 //!
 //!   bb-embed <spec.json> [mode] [seed]  > coords.json     mode = "recipe" (default) | "<n_conf>"
-//!   bb-spec "<smiles>" | bb-embed - recipe 210185 > coords.json
+//!   bb-spec-native "<smiles>" | bb-embed - recipe 210185 > coords.json
 //!   bb-embed <spec.json> score < coords.json  > energies.json   (validation: score EXTERNAL coords)
 //!
 //! "recipe" runs the two-stage core-pin recipe (conformer count from the spec); a number runs that
@@ -74,9 +74,19 @@ fn main() {
 
     let spec: MoleculeSpec = serde_json::from_str(&read_input(path)).expect("parse MoleculeSpec JSON");
 
-    let confs = match mode.parse::<usize>() {
-        Ok(n_conf) => bb_embed::embed(&spec, n_conf, seed), // independent embeds
-        Err(_) => bb_embed::embed_recipe(&spec, seed),      // faithful core-pin recipe
+    let embedded = match mode.parse::<usize>() {
+        // independent embeds
+        Ok(n_conf) => bb_embed::embed(&spec, n_conf, seed).map_err(bb_embed::RecipeError::from),
+        // core-pin recipe, block after block
+        Err(_) => bb_embed::embed_recipe(&spec, seed)
+            .map(|blocks| blocks.into_iter().flat_map(|b| b.conformers).collect()),
+    };
+    let confs: Vec<bb_embed::Conformer> = match embedded {
+        Ok(confs) => confs,
+        Err(e) => {
+            eprintln!("bb-embed: {e}");
+            std::process::exit(1);
+        }
     };
     let out = Out {
         n_atoms: spec.n_atoms,

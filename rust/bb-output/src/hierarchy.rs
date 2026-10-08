@@ -2,8 +2,8 @@
 //!
 //! Produces the `X`/`R`/`C`/`S` coordinate hierarchy from the typed molecule + conformations:
 //! independently-moving rigid structures ([`get_rigid_structures`]), per-atom position clustering and
-//! conf/set assembly ([`count_positions`], via [`crate::buckets`]), and the rigid core
-//! ([`find_rigid_component`]). Every intermediate is exposed on [`Built`] so it can be gated against
+//! conf/set assembly (`count_positions`, via [`crate::buckets`]), and the rigid core
+//! (`find_rigid_heavy`). Every intermediate is exposed on [`Built`] so it can be gated against
 //! the container's own `hierarchy.Hierarchy` internals, not just the final db2.
 
 use crate::buckets::Buckets;
@@ -258,8 +258,9 @@ fn find_rigid_heavy(pos_count: &[usize], atom_bonds: &[Vec<(usize, String)>], at
 }
 
 /// The iteration order of a CPython `set` built by inserting `items` in order (keys are atom indices;
-/// `hash(int) == int`). A faithful port of CPython `setobject.c` (`set_add_entry` + `set_table_resize`
-/// + `set_insert_clean`), validated against real CPython 3.10 on 20k random int lists (0 mismatches).
+/// `hash(int) == int`). A faithful port of CPython `setobject.c` (`set_add_entry` +
+/// `set_table_resize` + `set_insert_clean`), validated against real CPython 3.10 on 20k random int
+/// lists (0 mismatches).
 /// Constants are CPython's: LINEAR_PROBES=9, PERTURB_SHIFT=5, PySet_MINSIZE=8.
 fn cpython_set_iter_order(items: &[usize]) -> Vec<usize> {
     const LINEAR_PROBES: usize = 9;

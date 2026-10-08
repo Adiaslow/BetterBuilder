@@ -1,5 +1,6 @@
 [package]
 name = "bb-strain"
+description = "UCSF torsion-strain energy, RDKit-free: a port of the pipeline's Torsion_Strain."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

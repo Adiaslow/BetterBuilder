@@ -1,5 +1,6 @@
 [package]
 name = "bb-spec"
+description = "Setup without RDKit: assembles a molecule's MoleculeSpec from bb-perceive and bb-bounds."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

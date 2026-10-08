@@ -411,8 +411,7 @@ pub fn set13(mol: &Perceived, bounds: &mut BoundsMat, data: &mut ComputedData) {
         // pairs of incident bonds in bond order: outer i, inner j < i (matching getAtomBonds order)
         for i in 0..ab[aid2].len() {
             let (bid1, aid1) = ab[aid2][i];
-            for j in 0..i {
-                let (bid2, aid3) = ab[aid2][j];
+            for &(bid2, aid3) in &ab[aid2][..i] {
                 if data.bond_angle(bid1, bid2) >= 0.0 {
                     continue; // this bond pair already has an angle
                 }
@@ -1264,8 +1263,8 @@ impl<'a> S14<'a> {
                         } else {
                             self.set_two_in_same_ring_14(bid1, bid2, bid3, bounds, data);
                         }
-                    } else if (self.num_bond_rings[bid1] > 0 && self.num_bond_rings[bid2] > 0)
-                        || (self.num_bond_rings[bid2] > 0 && self.num_bond_rings[bid3] > 0)
+                    } else if self.num_bond_rings[bid2] > 0
+                        && (self.num_bond_rings[bid1] > 0 || self.num_bond_rings[bid3] > 0)
                     {
                         // two ring bonds in different rings -> treated like in-ring, ringSize 0
                         self.set_in_ring_14(bid1, bid2, bid3, 0, bounds, data);
@@ -1563,9 +1562,10 @@ mod tests {
     #[test]
     fn init_layout() {
         let m = BoundsMat::new(3);
-        assert_eq!(m.data[0 * 3 + 1], MAX_UPPER);
-        assert_eq!(m.data[1 * 3 + 0], 0.0);
-        assert_eq!(m.data[0 * 3 + 0], 0.0);
+        let at = |i: usize, j: usize| m.data[i * 3 + j];
+        assert_eq!(at(0, 1), MAX_UPPER);
+        assert_eq!(at(1, 0), 0.0);
+        assert_eq!(at(0, 0), 0.0);
     }
 
     #[test]
@@ -1573,8 +1573,9 @@ mod tests {
         let mut m = BoundsMat::new(3);
         m.set_upper(2, 0, 5.0);
         m.set_lower(0, 2, 1.0);
-        assert_eq!(m.data[0 * 3 + 2], 5.0);
-        assert_eq!(m.data[2 * 3 + 0], 1.0);
+        let at = |i: usize, j: usize| m.data[i * 3 + j];
+        assert_eq!(at(0, 2), 5.0);
+        assert_eq!(at(2, 0), 1.0);
         assert_eq!(m.lower(0, 2), 1.0);
     }
 

@@ -33,7 +33,7 @@ pub fn adjust_from_coord_map_f64(bounds: &mut [f64], n: usize, pinned: &[Option<
 
 /// The sidechain bounds RDKit's coordMap path produces, at machine precision (f64 raw bounds, f64
 /// pins, f64 smoothing): `base` with the pinned pair distances written in ([`adjust_from_coord_map_f64`])
-/// and re-smoothed at [`SMOOTH_TOL`]. Falls back to the pin-free smoothed bounds if the pinned
+/// and re-smoothed at `SMOOTH_TOL`. Falls back to the pin-free smoothed bounds if the pinned
 /// distances are triangle-inconsistent (unreachable for pins taken from a real embedded conformer,
 /// whose distances are realizable — the only way the recipe produces them).
 pub fn coord_map_bounds_f64(base: &[f64], n: usize, pinned: &[Option<[f64; 3]>]) -> Vec<f64> {

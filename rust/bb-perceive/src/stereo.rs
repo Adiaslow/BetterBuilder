@@ -14,6 +14,11 @@ use crate::smarts_match::{Perceived, Stereo};
 use crate::SmilesGraph;
 use yowl::feature::BondKind;
 
+/// RDKit perceives no E/Z on a double bond whose smallest ring has fewer atoms than this
+/// (`Chirality::minRingSizeForDoubleBondStereo`); `SmilesToMol`'s stereo perception (legacy, with
+/// `cleanIt`) sets such bonds to `STEREONONE` whatever their `/` and `\` markers say.
+const MIN_RING_SIZE_FOR_DOUBLE_BOND_STEREO: usize = 8;
+
 /// The direction of a bond as written, `true` for `/` (up), `false` for `\` (down).
 fn direction(kind: BondKind) -> Option<bool> {
     match kind {
@@ -44,9 +49,18 @@ pub fn assign(g: &SmilesGraph, out: &mut Perceived) {
             .find(|&bi| out.bond_order[bi] != 2 && direction(g.bond_kinds[bi]).is_some())
     };
 
+    let mut in_small_ring = vec![false; out.bonds.len()];
+    for (ring, bonds) in out.rings.iter().zip(out.bond_rings()) {
+        if ring.len() < MIN_RING_SIZE_FOR_DOUBLE_BOND_STEREO {
+            for bi in bonds {
+                in_small_ring[bi] = true;
+            }
+        }
+    }
+
     for (bi, &(begin, end)) in g.bonds.iter().enumerate() {
-        if out.bond_order[bi] != 2 || out.bond_stereo[bi] == Stereo::Any {
-            continue; // only definite (non-Any) double bonds
+        if out.bond_order[bi] != 2 || out.bond_stereo[bi] == Stereo::Any || in_small_ring[bi] {
+            continue; // only definite (non-Any) double bonds outside small rings
         }
         let (Some(db), Some(de)) = (neighboring_directed(begin), neighboring_directed(end)) else {
             continue; // needs a directed bond at each end
@@ -70,5 +84,27 @@ pub fn assign(g: &SmilesGraph, out: &mut Perceived) {
             end_dir = !end_dir;
         }
         out.bond_stereo[bi] = if begin_dir == end_dir { Stereo::Trans } else { Stereo::Cis };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::smarts_match::{perceive, Stereo};
+
+    /// The stereo of every double bond in `smiles`.
+    fn double_bond_stereo(smiles: &str) -> Vec<Stereo> {
+        let p = perceive(smiles).expect("perceives");
+        (0..p.bonds.len()).filter(|&bi| p.bond_order[bi] == 2).map(|bi| p.bond_stereo[bi]).collect()
+    }
+
+    /// RDKit (2026.09.1pre, `Chem.MolFromSmiles`, measured 2026-10-06) gives `STEREONONE` for a marked
+    /// double bond in a 6- or 7-membered ring and `STEREOE` for one in an 8-membered ring or outside any
+    /// ring; for these molecules E is the trans arrangement of the marked substituents.
+    #[test]
+    fn small_ring_double_bonds_carry_no_stereo() {
+        assert_eq!(double_bond_stereo("C1C/C=C/CC1"), [Stereo::None]);
+        assert_eq!(double_bond_stereo("C1CC/C=C/CC1"), [Stereo::None]);
+        assert_eq!(double_bond_stereo("C1CCC/C=C/CC1"), [Stereo::Trans]);
+        assert_eq!(double_bond_stereo("F/C=C/F"), [Stereo::Trans]);
     }
 }

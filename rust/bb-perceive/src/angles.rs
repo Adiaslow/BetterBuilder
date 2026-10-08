@@ -20,10 +20,8 @@ pub struct Angle {
 pub fn collect(ex: &Explicit, bond_orders: &[u8], degrees: &[usize]) -> Vec<Angle> {
     let bonds = &ex.bonds;
     let mut out = Vec::new();
-    for i in 0..bonds.len() {
-        let (a11, a12) = bonds[i];
-        for j in (i + 1)..bonds.len() {
-            let (a21, a22) = bonds[j];
+    for (i, &(a11, a12)) in bonds.iter().enumerate() {
+        for (j, &(a21, a22)) in bonds.iter().enumerate().skip(i + 1) {
             if a11 != a21 && a11 != a22 && a12 != a21 && a12 != a22 {
                 continue;
             }

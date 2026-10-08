@@ -172,11 +172,14 @@ fn hierarchy_internals_match() {
 
 #[test]
 fn tarball_members() {
-    use bb_output::tarball::full_name;
+    use bb_output::tarball::{full_name, ChargeLetter};
+    use bb_output::MoleculeName;
     // charge char: N neutral, M -1, O +1 (chr(78 + charge))
-    assert_eq!(full_name("benzoic", 0, 0), "benzoic.0.N");
-    assert_eq!(full_name("x", 0, -1), "x.0.M");
-    assert_eq!(full_name("x", 2, 1), "x.2.O");
+    let name = |s: &str| MoleculeName::new(s).unwrap();
+    let letter = |c: i32| ChargeLetter::new(c).unwrap();
+    assert_eq!(full_name(&name("benzoic"), 0, letter(0)), "benzoic.0.N");
+    assert_eq!(full_name(&name("x"), 0, letter(-1)), "x.0.M");
+    assert_eq!(full_name(&name("x"), 2, letter(1)), "x.2.O");
 
     // assemble a real ligand's two artifacts and verify member names + byte-exact contents survive
     let (m, s, _) = load("benzoic.0");
@@ -184,9 +187,9 @@ fn tarball_members() {
     let mol2 = bb_output::write_mol2(&m, &charges, 0);
     let db2 = bb_db2::write_entry(&build(&m, &s).unwrap());
     let bytes = bb_output::write_tarball(&[bb_output::Ligand {
-        name: "benzoic".into(),
+        name: name("benzoic"),
         prot_id: 0,
-        formal_charge: s.charge.round() as i32,
+        charge: letter(s.charge.round() as i32),
         mol2: mol2.clone(),
         db2: db2.clone(),
     }])

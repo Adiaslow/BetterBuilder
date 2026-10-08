@@ -134,7 +134,7 @@ fn stage_c_torsion_and_improper_match_rdkit() {
 fn stage_c_full_gradient_matches_rdkit() {
     for &smiles in STAGE_C {
         let spec = bb_spec::build_native(smiles).expect("native spec");
-        for conf in bb_embed::embed(&spec, 3, 0xC0FFEE) {
+        for conf in bb_embed::embed(&spec, 3, 0xC0FFEE).expect("embed") {
             let c = &conf.coords;
             let (dist_c, angle_c) = forcefield::build_stage_c_constraints(&spec, c);
             let native = forcefield::stage_c_energy_grad(&spec, &dist_c, &angle_c, c).1;
@@ -155,7 +155,7 @@ fn angle_constraint_active_and_matches() {
     // RDKit's construct3DForceField there.
     for smiles in ["N#Cc1ccccc1", "CC#CC"] {
         let spec = bb_spec::build_native(smiles).unwrap();
-        let mut c = bb_embed::embed(&spec, 1, 0xC0FFEE)[0].coords.clone();
+        let mut c = bb_embed::embed(&spec, 1, 0xC0FFEE).expect("embed")[0].coords.clone();
         // deterministic bend: shove every atom by an index-dependent amount
         for (k, x) in c.iter_mut().enumerate() { *x += 0.15 * (((k * 7 + 3) % 5) as f64 - 2.0); }
         let (dc, ac) = forcefield::build_stage_c_constraints(&spec, &c);

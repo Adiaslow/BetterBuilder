@@ -1,5 +1,6 @@
 [package]
 name = "bb-output"
+description = "The DOCK build-pipeline output artifacts (typed molecule, mol2, db2 hierarchy, tarball) and bb-build, which runs the whole pipeline from SMILES."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +17,7 @@ bb-strain = { path = "../bb-strain" }
 bb-solv = { path = "../bb-solv" }
 tar = "0.4"
 flate2 = "1"
+thiserror = "2"
 
 [dev-dependencies]
 # Gate-only: load the container-dumped oracle JSON (input + every hierarchy internal). Production
@@ -25,6 +27,8 @@ serde_json = { workspace = true }
 # the tarball gate extracts and inspects members
 tar = "0.4"
 flate2 = "1"
+# property test: any accepted name packs into safe archive members
+proptest = "1"
 
 [[bin]]
 name = "bb-build"

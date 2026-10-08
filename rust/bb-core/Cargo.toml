@@ -1,6 +1,6 @@
 [package]
 name = "bb-core"
-description = "Shared data contract: the MoleculeSpec that carries a molecule's distance-geometry problem (bounds, torsions, chiral sets) between the RDKit-backed setup (bb-rdkit) and the embedder (bb-embed)."
+description = "Shared data contract: the MoleculeSpec that carries a molecule's distance-geometry problem (bounds, torsions, chiral sets) from setup (bb-spec) to the embedder (bb-embed), and the triangle smoothing both use."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

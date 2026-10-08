@@ -4,9 +4,11 @@
 //! Those small tests prove each formula on a curated handful; this proves it on the workload, the
 //! way `gate_spec` does for the MoleculeSpec (RIGOR.md, Phase 1).
 //!
-//! Opt-in: set `BB_PARITY_CORPUS` to a `<smiles> <name>` file. Without it the test skips (so it does
-//! not slow the default `cargo test`). Reports worst-case magnitude and a disagreement count per
-//! axis, and fails if any molecule exceeds tolerance — the count *is* the result.
+//! Ignored by default (reported as skipped); run with `--ignored` and `BB_PARITY_CORPUS` set to a
+//! `<smiles> <name>` file. Every molecule is either compared on every axis that applies to it or
+//! named as a failure: both sides rejecting a molecule is agreement, one side alone rejecting it,
+//! our embed producing no conformer, or RDKit returning no value are failures, never silent passes.
+//! Reports worst-case magnitude per axis and fails if any molecule exceeds tolerance.
 //!
 //!   BB_PARITY_CORPUS=validation/seeds_100.smi cargo test -p bb-rdkit --test corpus_parity -- --nocapture
 
@@ -20,8 +22,8 @@ impl Lcg {
     }
 }
 
-/// Worst per-component |Δ| relative to gradient magnitude; None if the oracle vector is missing or
-/// mis-sized (a bridge parse failure), so the caller can count it as an oracle skip, not a pass.
+/// Worst per-component |Δ| relative to gradient magnitude; `None` if RDKit's vector is missing or
+/// mis-sized (a bridge failure), which the caller reports as a molecule it could not compare.
 fn rel(a: &[f64], b: &[f64]) -> Option<f64> {
     if b.is_empty() || a.len() != b.len() {
         return None;
@@ -30,20 +32,52 @@ fn rel(a: &[f64], b: &[f64]) -> Option<f64> {
     Some(a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max) / mag)
 }
 
-fn native_check_bits(spec: &bb_core::MoleculeSpec, c: &[f64]) -> [i32; 6] {
-    let pinned = vec![None; spec.n_atoms];
-    [
-        checks::check_tetrahedral_centers(spec, c, &pinned) as i32,
-        checks::check_chiral_centers(spec, c) as i32,
-        checks::planarity_ok(spec, c) as i32,
-        checks::double_bond_geometry_ok(spec, c) as i32,
-        checks::final_chiral_checks(spec, c) as i32,
-        checks::double_bond_stereo_ok(spec, c) as i32,
-    ]
+/// One comparison axis over the corpus: molecules compared, the worst difference and where, how many
+/// exceeded tolerance, molecules it could not compare (each a failure), and molecules it does not
+/// apply to.
+struct Axis {
+    name: &'static str,
+    tol: f64,
+    compared: usize,
+    worst: f64,
+    worst_smi: String,
+    over: usize,
+    uncompared: Vec<String>,
+    not_applicable: usize,
 }
 
-// Derived tolerances (RIGOR.md): Stage A ~machine precision; Stage C carries f32-bounds + torsion
-// numerics; coord_map_bounds is f32 storage of a f64 matrix. Checks are exact (bit agreement).
+impl Axis {
+    fn new(name: &'static str, tol: f64) -> Self {
+        Axis { name, tol, compared: 0, worst: 0.0, worst_smi: String::new(), over: 0, uncompared: Vec::new(), not_applicable: 0 }
+    }
+    fn record(&mut self, smi: &str, d: f64) {
+        self.compared += 1;
+        if d > self.worst {
+            self.worst = d;
+            self.worst_smi = smi.to_string();
+        }
+        if d > self.tol {
+            self.over += 1;
+        }
+    }
+    fn cannot(&mut self, smi: &str, why: &str) {
+        self.uncompared.push(format!("{smi}: {why}"));
+    }
+    fn report(&self) {
+        println!(
+            "{:<17}: {} compared, worst {:.2e} ({}) | {} over {:.0e} | {} could not compare | {} not applicable",
+            self.name, self.compared, self.worst, self.worst_smi, self.over, self.tol, self.uncompared.len(), self.not_applicable
+        );
+        for u in self.uncompared.iter().take(8) {
+            println!("    {u}");
+        }
+    }
+    fn failures(&self) -> usize {
+        self.over + self.uncompared.len()
+    }
+}
+
+// Fixed tolerances, not yet derived from the evaluations' floating-point error.
 const TOL_A: f64 = 1e-12; // f64 bounds → Stage-A distance term matches RDKit to machine precision
 const TOL_B: f64 = 1e-12; // Stage B = the same distance term at weights 0.2/1.0
 const TOL_C: f64 = 1e-6;  // machine-precision except the FP floor at V=100 planarity torsions (near-planar 1/sinφ)
@@ -51,34 +85,41 @@ const TOL_CMB: f64 = 1e-9; // f64 raw_bounds + f64 coordMap → machine precisio
 const TOL_RE: f64 = 1e-12; // reject energy is an exact identity (native + chiral+4th) vs RDKit calcEnergy; only summation order differs
 
 #[test]
+#[ignore = "corpus-scale gate: needs BB_PARITY_CORPUS; run with --ignored, as rust/gates.sh live and hunt do"]
 fn corpus_parity() {
-    let corpus = match std::env::var("BB_PARITY_CORPUS") {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("BB_PARITY_CORPUS unset — skipping corpus-scale parity");
-            return;
-        }
-    };
+    let corpus = std::env::var("BB_PARITY_CORPUS").expect("BB_PARITY_CORPUS must name the corpus to check");
     let text = std::fs::read_to_string(&corpus).expect("read corpus");
     let smiles: Vec<String> = text
         .lines()
         .filter_map(|l| l.split_whitespace().next().map(str::to_string))
         .collect();
 
-    let (mut n, mut spec_fail, mut embed_fail) = (0usize, 0usize, 0usize);
-    let (mut worst_a, mut worst_b, mut worst_c, mut worst_cmb) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-    let (mut fail_a, mut fail_b, mut fail_c, mut fail_cmb) = (0usize, 0usize, 0usize, 0usize);
-    let (mut worst_re, mut fail_re) = (0.0f64, 0usize);
-    let (mut check_diffs, mut check_evals) = (0usize, 0usize);
-    let (mut wa_smi, mut wb_smi, mut wc_smi, mut wcmb_smi) = (String::new(), String::new(), String::new(), String::new());
-    let mut wre_smi = String::new();
-    let mut check_diff_ex: Vec<String> = Vec::new();
+    let mut a = Axis::new("Stage-A gradient", TOL_A);
+    let mut b = Axis::new("Stage-B gradient", TOL_B);
+    let mut c = Axis::new("Stage-C gradient", TOL_C);
+    let mut re = Axis::new("reject energy", TOL_RE);
+    let mut cmb = Axis::new("coord_map_bounds", TOL_CMB);
+    // the checks' accept/reject decision: a disagreement counts as 1.0 against a tolerance of 0
+    let mut dec = Axis::new("checks decision", 0.0);
+    let (mut n, mut both_reject) = (0usize, 0usize);
+    let (mut only_ours_rejects, mut only_rdkit_rejects, mut no_conformer) = (Vec::new(), Vec::new(), Vec::new());
 
     for (i, smi) in smiles.iter().enumerate() {
-        let spec = match bb_spec::build_native(smi) {
-            Ok(s) => s,
-            Err(_) => {
-                spec_fail += 1;
+        // setup: both sides must agree on whether the molecule is acceptable at all
+        let ours = bb_spec::build_native(smi);
+        let theirs = bb_rdkit::build_spec(smi);
+        let spec = match (ours, theirs) {
+            (Ok(s), Ok(_)) => s,
+            (Err(_), Err(_)) => {
+                both_reject += 1;
+                continue;
+            }
+            (Err(e), Ok(_)) => {
+                only_ours_rejects.push(format!("{smi}: {e}"));
+                continue;
+            }
+            (Ok(_), Err(e)) => {
+                only_rdkit_rejects.push(format!("{smi}: {e}"));
                 continue;
             }
         };
@@ -90,14 +131,9 @@ fn corpus_parity() {
         let coords4: Vec<f64> = (0..np * 4).map(|_| rng.f()).collect();
         let na = forcefield::stage_a_energy_grad(&spec, &coords4, 4, forcefield::BASIN_DEFAULT).1;
         let ra = bb_rdkit::stage_a_ff_grad(smi, &coords4, forcefield::W_CHIRAL, forcefield::W_FOURTH, forcefield::BASIN_DEFAULT);
-        if let Some(r) = rel(&na, &ra) {
-            if r > worst_a {
-                worst_a = r;
-                wa_smi = smi.clone();
-            }
-            if r > TOL_A {
-                fail_a += 1;
-            }
+        match rel(&na, &ra) {
+            Some(d) => a.record(smi, d),
+            None => a.cannot(smi, "RDKit returned no Stage-A gradient"),
         }
 
         // --- Stage-A reject ENERGY at the same geometry: native's `stage_a_reject_energy` must equal
@@ -107,109 +143,91 @@ fn corpus_parity() {
         // energy matches to machine precision the 0.05 reject decision is identical by construction. ---
         let nre = forcefield::stage_a_reject_energy(&spec, &coords4, 4, forcefield::BASIN_DEFAULT);
         let rre = bb_rdkit::stage_a_energy(smi, &coords4, forcefield::W_CHIRAL, forcefield::W_FOURTH, forcefield::BASIN_DEFAULT);
-        if !rre.is_nan() {
-            let r = (nre - rre).abs() / nre.abs().max(rre.abs()).max(1.0);
-            if r > worst_re {
-                worst_re = r;
-                wre_smi = smi.clone();
-            }
-            if r > TOL_RE {
-                fail_re += 1;
-            }
+        if rre.is_nan() {
+            re.cannot(smi, "RDKit returned NaN for the reject energy");
+        } else {
+            re.record(smi, (nre - rre).abs() / nre.abs().max(rre.abs()).max(1.0));
         }
 
         // --- Stage B: same distance term at chiral 0.2 / 4th-dim 1.0 (minimizeFourthDimension) ---
         let nb2 = forcefield::stage_b_energy_grad(&spec, &coords4, 4, forcefield::BASIN_DEFAULT).1;
         let rb2 = bb_rdkit::stage_a_ff_grad(smi, &coords4, 0.2, 1.0, forcefield::BASIN_DEFAULT);
-        if let Some(r) = rel(&nb2, &rb2) {
-            if r > worst_b {
-                worst_b = r;
-                wb_smi = smi.clone();
-            }
-            if r > TOL_B {
-                fail_b += 1;
-            }
+        match rel(&nb2, &rb2) {
+            Some(d) => b.record(smi, d),
+            None => b.cannot(smi, "RDKit returned no Stage-B gradient"),
         }
 
         // --- Everything geometry-based needs one embedded conformer ---
-        let confs = bb_embed::embed(&spec, 1, 0xC0FFEE ^ i as u64);
-        let conf = match confs.first() {
-            Some(c) if c.coords.len() == np * 3 => &c.coords,
-            _ => {
-                embed_fail += 1;
+        let confs = match bb_embed::embed(&spec, 1, 0xC0FFEE ^ i as u64) {
+            Ok(confs) => confs,
+            Err(e) => {
+                no_conformer.push(format!("{smi}: {e}"));
                 continue;
             }
         };
+        let conf = &confs[0].coords;
 
         // --- Stage C full gradient ---
         let (dc, ac) = forcefield::build_stage_c_constraints(&spec, conf);
         let nc = forcefield::stage_c_energy_grad(&spec, &dc, &ac, conf).1;
         let rc = bb_rdkit::stage_c_ff_grad(smi, conf);
-        if let Some(r) = rel(&nc, &rc) {
-            if r > worst_c {
-                worst_c = r;
-                wc_smi = smi.clone();
-            }
-            if r > TOL_C {
-                fail_c += 1;
-            }
+        match rel(&nc, &rc) {
+            Some(d) => c.record(smi, d),
+            None => c.cannot(smi, "RDKit returned no Stage-C gradient"),
         }
 
-        // --- The six checks, native vs RDKit's real routines, on the same conformer ---
-        let rb = bb_rdkit::embed_checks(smi, conf);
-        if rb.len() == 6 {
-            check_evals += 1;
-            let nb = native_check_bits(&spec, conf);
-            if nb[..] != rb[..] {
-                check_diffs += 1;
-                if check_diff_ex.len() < 8 {
-                    check_diff_ex.push(format!("{smi}: native={nb:?} rdkit={rb:?}"));
-                }
-            }
+        // --- The checks' accept/reject decision, native vs RDKit's real routines, on the same
+        // conformer: RDKit accepts only if every check passes (`embed_checks_parity` covers each
+        // check deciding alone) ---
+        let rbits = bb_rdkit::embed_checks(smi, conf);
+        if rbits.len() == 6 {
+            let rdkit_accepts = rbits.iter().all(|&x| x == 1);
+            let native_accepts = checks::passes_checks(&spec, conf, &[]);
+            dec.record(smi, if native_accepts == rdkit_accepts { 0.0 } else { 1.0 });
+        } else {
+            dec.cannot(smi, "RDKit returned no check results");
         }
 
         // --- Core-pin bounds tightening with the recipe's real pins ---
-        if !spec.pin_atoms.is_empty() && !spec.raw_bounds_f64.is_empty() {
+        if spec.pin_atoms.is_empty() {
+            cmb.not_applicable += 1;
+        } else {
             let mut pinned = vec![None; np];
             let (mut idx, mut xyz) = (Vec::new(), Vec::new());
-            for &a in &spec.pin_atoms {
-                let a = a as usize;
-                let p = [conf[a * 3], conf[a * 3 + 1], conf[a * 3 + 2]];
-                pinned[a] = Some(p);
-                idx.push(a as i32);
-                xyz.extend_from_slice(&p);
+            for &p in &spec.pin_atoms {
+                let p = p as usize;
+                let x = [conf[p * 3], conf[p * 3 + 1], conf[p * 3 + 2]];
+                pinned[p] = Some(x);
+                idx.push(p as i32);
+                xyz.extend_from_slice(&x);
             }
             let ncmb = bb_embed::bounds::coord_map_bounds_f64(&spec.raw_bounds_f64, np, &pinned);
             let rcmb = bb_rdkit::coord_map_bounds(smi, &idx, &xyz);
-            if !rcmb.is_empty() && ncmb.len() == rcmb.len() {
-                let d = ncmb.iter().zip(&rcmb).map(|(&x, &y)| (x - y).abs()).fold(0.0f64, f64::max);
-                if d > worst_cmb {
-                    worst_cmb = d;
-                    wcmb_smi = smi.clone();
-                }
-                if d > TOL_CMB {
-                    fail_cmb += 1;
-                }
+            if rcmb.is_empty() || ncmb.len() != rcmb.len() {
+                cmb.cannot(smi, "RDKit returned no coordMap bounds of the right size");
+            } else {
+                cmb.record(smi, ncmb.iter().zip(&rcmb).map(|(&x, &y)| (x - y).abs()).fold(0.0f64, f64::max));
             }
         }
     }
 
     println!("\n=== corpus parity: {corpus} ===");
-    println!("molecules: {n} built, {spec_fail} spec-fail, {embed_fail} embed-fail");
-    println!("Stage-A gradient : worst {worst_a:.2e} ({wa_smi})  | {fail_a} over {TOL_A:.0e}");
-    println!("Stage-B gradient : worst {worst_b:.2e} ({wb_smi})  | {fail_b} over {TOL_B:.0e}");
-    println!("Stage-C gradient : worst {worst_c:.2e} ({wc_smi})  | {fail_c} over {TOL_C:.0e}");
-    println!("checks (6-bit)   : {check_diffs} disagree / {check_evals} evaluated");
-    for e in &check_diff_ex {
+    println!(
+        "molecules: {} in corpus, {n} compared, {both_reject} rejected by both sides, {} rejected by ours only, {} by RDKit only, {} without a conformer",
+        smiles.len(), only_ours_rejects.len(), only_rdkit_rejects.len(), no_conformer.len()
+    );
+    for e in only_ours_rejects.iter().chain(&only_rdkit_rejects).chain(&no_conformer).take(8) {
         println!("    {e}");
     }
-    println!("coord_map_bounds : worst {worst_cmb:.2e} ({wcmb_smi})  | {fail_cmb} over {TOL_CMB:.0e}");
-    println!("reject energy    : worst {worst_re:.2e} ({wre_smi})  | {fail_re} over {TOL_RE:.0e}");
+    for axis in [&a, &b, &c, &re, &dec, &cmb] {
+        axis.report();
+    }
 
-    assert_eq!(fail_a, 0, "Stage-A gradient exceeded {TOL_A:.0e} on {fail_a} molecules");
-    assert_eq!(fail_b, 0, "Stage-B gradient exceeded {TOL_B:.0e} on {fail_b} molecules");
-    assert_eq!(fail_c, 0, "Stage-C gradient exceeded {TOL_C:.0e} on {fail_c} molecules");
-    assert_eq!(check_diffs, 0, "checks disagreed on {check_diffs} molecules");
-    assert_eq!(fail_cmb, 0, "coord_map_bounds exceeded {TOL_CMB:.0e} on {fail_cmb} molecules");
-    assert_eq!(fail_re, 0, "reject energy exceeded {TOL_RE:.0e} on {fail_re} molecules");
+    assert!(n > 0, "no molecule of {} was compared", smiles.len());
+    assert!(only_ours_rejects.is_empty(), "{} molecules rejected by our setup only", only_ours_rejects.len());
+    assert!(only_rdkit_rejects.is_empty(), "{} molecules rejected by RDKit only", only_rdkit_rejects.len());
+    assert!(no_conformer.is_empty(), "{} molecules got no conformer to compare on", no_conformer.len());
+    for axis in [&a, &b, &c, &re, &dec, &cmb] {
+        assert_eq!(axis.failures(), 0, "{}: {} over {:.0e}, {} could not compare", axis.name, axis.over, axis.tol, axis.uncompared.len());
+    }
 }

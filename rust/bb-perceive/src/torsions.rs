@@ -23,27 +23,6 @@ pub struct Torsion {
     pub v: [f64; 6],
 }
 
-/// Ring membership expressed over bonds: one entry per ring, listing its bond indices.
-fn bond_rings(mol: &Perceived) -> Vec<Vec<usize>> {
-    let mut index = std::collections::HashMap::new();
-    for (bi, &(a, b)) in mol.bonds.iter().enumerate() {
-        index.insert((a.min(b), a.max(b)), bi);
-    }
-    mol.rings
-        .iter()
-        .map(|ring| {
-            let set: std::collections::HashSet<usize> = ring.iter().copied().collect();
-            mol.bonds
-                .iter()
-                .enumerate()
-                .filter(|(_, &(a, b))| set.contains(&a) && set.contains(&b))
-                .map(|(bi, _)| bi)
-                .filter(|bi| mol.bond_in_ring.get(*bi).copied().unwrap_or(false))
-                .collect()
-        })
-        .collect()
-}
-
 /// Bonds whose torsion is fixed by a fused small ring rather than by a pattern.
 fn excluded_bonds(brings: &[Vec<usize>], n_bonds: usize) -> Vec<bool> {
     let mut excluded = vec![false; n_bonds];
@@ -83,7 +62,7 @@ pub struct Compiled {
 pub fn assign(mol: &Perceived, lib: &[TorsionPattern], asts: &[Compiled]) -> (Vec<Torsion>, Vec<bool>) {
     let matcher = Matcher::new(mol.view());
     let n_bonds = mol.bonds.len();
-    let brings = bond_rings(mol);
+    let brings = mol.bond_rings();
     let excluded = excluded_bonds(&brings, n_bonds);
     let mut rings_per_bond = vec![0usize; n_bonds];
     for r in &brings {
@@ -190,12 +169,11 @@ pub fn basic_knowledge(
 
     // inversion centres: SP2 C/N/O with three neighbours
     let mut impropers = Vec::new();
-    for c in 0..n {
+    for (c, nb) in adj.iter().enumerate() {
         let z = mol.atomic_numbers[c];
-        if !matches!(z, 6 | 7 | 8) || mol.hybridization[c] != Sp2 || adj[c].len() != 3 {
+        if !matches!(z, 6..=8) || mol.hybridization[c] != Sp2 || nb.len() != 3 {
             continue;
         }
-        let nb = &adj[c];
         let is_c_bound_to_sp2_o = z == 6
             && nb
                 .iter()

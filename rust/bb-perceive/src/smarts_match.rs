@@ -236,7 +236,6 @@ pub fn ring_data(
             ring_bonds_at[b] += 1;
         }
     }
-    let _ = HashMap::<usize, usize>::new();
     (sizes, count, ring_bonds_at)
 }
 
@@ -416,8 +415,8 @@ pub fn perceive(smiles: &str) -> Result<Perceived, crate::ParseError> {
     // pre-AddHs index, so the counts line up; each appended hydrogen has total valence 1.
     let n_heavy = g.atoms.len();
     let mut total_valence = vec![1i32; n];
-    for i in 0..n_heavy {
-        total_valence[i] = counts.explicit_valence[i] + counts.implicit_valence[i];
+    for (i, tv) in total_valence.iter_mut().take(n_heavy).enumerate() {
+        *tv = counts.explicit_valence[i] + counts.implicit_valence[i];
     }
     // atomHasConjugatedBond: an atom is conjugated if any incident (heavy) bond is. Bonds to
     // appended hydrogens are never conjugated, so only the heavy bonds contribute.
@@ -475,6 +474,25 @@ pub fn perceive(smiles: &str) -> Result<Perceived, crate::ParseError> {
 }
 
 impl Perceived {
+    /// Ring membership over bonds: for each ring of `rings`, in the same order, the indices of the ring
+    /// bonds whose two atoms both lie in it.
+    pub fn bond_rings(&self) -> Vec<Vec<usize>> {
+        self.rings
+            .iter()
+            .map(|ring| {
+                let set: std::collections::HashSet<usize> = ring.iter().copied().collect();
+                self.bonds
+                    .iter()
+                    .enumerate()
+                    .filter(|&(bi, &(a, b))| {
+                        set.contains(&a) && set.contains(&b) && self.bond_in_ring.get(bi).copied().unwrap_or(false)
+                    })
+                    .map(|(bi, _)| bi)
+                    .collect()
+            })
+            .collect()
+    }
+
     pub fn view(&self) -> MolView<'_> {
         let n = self.atomic_numbers.len();
         let mut adj = vec![Vec::new(); n];

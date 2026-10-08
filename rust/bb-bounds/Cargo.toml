@@ -1,5 +1,6 @@
 [package]
 name = "bb-bounds"
+description = "The distance-geometry bounds matrix for a perceived molecule: an RDKit-free port of RDKit's setTopolBounds and the force-field parameters it reads."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

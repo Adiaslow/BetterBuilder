@@ -32,7 +32,7 @@ fn coord_map_bounds_match_rdkit() {
     for &smiles in MOLECULES {
         let spec = bb_spec::build_native(smiles).expect("native spec");
         let n = spec.n_atoms;
-        let conf = &bb_embed::embed(&spec, 1, 0xC0FFEE)[0].coords;
+        let conf = &bb_embed::embed(&spec, 1, 0xC0FFEE).expect("embed")[0].coords;
 
         // Pin roughly the first third of the atoms as a "core", at their embedded coordinates —
         // a geometrically consistent pin set (distances are realizable, so smoothing succeeds).

@@ -244,9 +244,9 @@ pub fn symmetrized_sssr(n_atoms: usize, bonds: &[(usize, usize)]) -> Vec<Vec<usi
     // bond with it, and supplies every bond that ring alone provides.
     let mut bond_counts = vec![0usize; g.bonds.len()];
     for &bi in &basis {
-        for k in 0..g.bonds.len() {
+        for (k, count) in bond_counts.iter_mut().enumerate() {
             if cands[bi].bonds.get(k) {
-                bond_counts[k] += 1;
+                *count += 1;
             }
         }
     }
@@ -260,13 +260,13 @@ pub fn symmetrized_sssr(n_atoms: usize, bonds: &[(usize, usize)]) -> Vec<Vec<usi
             }
             let mut share = false;
             let mut covers_unique = true;
-            for k in 0..g.bonds.len() {
+            for (k, &count) in bond_counts.iter().enumerate() {
                 if !r.bonds.get(k) {
                     continue;
                 }
                 if e.bonds.get(k) {
                     share = true;
-                } else if bond_counts[k] == 1 {
+                } else if count == 1 {
                     covers_unique = false;
                 }
             }

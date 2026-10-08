@@ -1,7 +1,8 @@
 //! bb-core — the `MoleculeSpec` data contract: the distance-geometry problem for one molecule.
 //!
-//! Produced by `bb-rdkit` setup and consumed by the `bb-embed` engine. Numeric arrays only;
-//! serde-serializable, so the two CLIs exchange it as JSON. [`smooth`] holds the triangle-inequality
+//! Produced by setup — `bb-spec`, with no RDKit; `bb-rdkit`'s bridge builds the same contract for the
+//! parity gates — and consumed by the `bb-embed` engine. Numeric arrays only; serde-serializable, so
+//! the CLIs exchange it as JSON. [`smooth`] holds the triangle-inequality
 //! operation on the bounds matrix — the one primitive both the spec builder and the engine share.
 
 pub mod smooth;
@@ -226,17 +227,33 @@ mod tests {
         assert!(spec.ub(0, 1) >= spec.lb(0, 1));
     }
 
+    /// A spec survives a JSON round trip bit for bit, its f64 matrices included: the `MoleculeSpec`
+    /// JSON contract between `bb-spec-native` and `bb-embed` must hand the embed exactly the spec that
+    /// was built, or the chaotic embed diverges from the in-process pipeline. The values are full-
+    /// precision f64s spread over the range bounds take, 1 to 20 Å.
     #[test]
     fn molecule_spec_round_trips_json() {
+        let n = 100;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            1.0 + 19.0 * ((state >> 11) as f64 / (1u64 << 53) as f64)
+        };
+        let bounds_f64: Vec<f64> = (0..n * n).map(|_| next()).collect();
+        let raw_bounds_f64: Vec<f64> = (0..n * n).map(|_| next()).collect();
         let spec = MoleculeSpec {
-            n_atoms: 2,
+            n_atoms: n,
             dim: 4,
-            bounds: vec![0.0, 1.46, 1.44, 0.0],
+            bounds: bounds_f64.iter().map(|&x| x as f32).collect(),
+            bounds_f64,
+            raw_bounds_f64,
             ..Default::default()
         };
-        let json = serde_json::to_string(&spec).unwrap();
-        let back: MoleculeSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.n_atoms, 2);
-        assert_eq!(back.ub(0, 1), 1.46);
+        let back: MoleculeSpec = serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        let changed = |a: &[f64], b: &[f64]| a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+        assert_eq!(back.n_atoms, n);
+        assert_eq!(changed(&back.bounds_f64, &spec.bounds_f64), 0, "bounds_f64 values changed");
+        assert_eq!(changed(&back.raw_bounds_f64, &spec.raw_bounds_f64), 0, "raw_bounds_f64 values changed");
+        assert_eq!(back.bounds, spec.bounds, "f32 bounds changed");
     }
 }

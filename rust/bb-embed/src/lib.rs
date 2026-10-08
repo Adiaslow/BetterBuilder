@@ -20,6 +20,11 @@ use rayon::prelude::*;
 /// Stage-A result with `calcEnergy()/nAtoms` at or above this is discarded and the conformer redrawn.
 const MAX_MINIMIZED_E_PER_ATOM: f64 = 0.05;
 
+/// The safeguard against an input that cannot be embedded: [`embed`] makes at most this many times
+/// as many draws as conformers requested, and [`embed_recipe`] uses at most this many times as many
+/// cores as blocks requested, before reporting a [`Shortfall`].
+pub const MAX_TRIES_PER_REQUEST: usize = 2;
+
 /// A generated conformer: `n_atoms * 3` xyz, row-major.
 #[derive(Clone, Debug)]
 pub struct Conformer {
@@ -37,6 +42,40 @@ impl Conformer {
     }
 }
 
+/// One block of the core-pin recipe: the sidechain conformers embedded around one core, every one
+/// holding `spec.pin_atoms` at that core's coordinates.
+#[derive(Clone, Debug)]
+pub struct Block {
+    /// The core the block is built on, as numbered by [`recipe_core`].
+    pub core: usize,
+    pub conformers: Vec<Conformer>,
+}
+
+/// Fewer conformers than requested could be embedded, even after every redraw or replacement core
+/// the entry point allows.
+#[derive(Debug, thiserror::Error)]
+#[error("embedded {embedded} of {requested} requested conformers")]
+pub struct Shortfall {
+    pub requested: usize,
+    pub embedded: usize,
+}
+
+/// Why [`embed_recipe`] returned no ensemble. The first two mean the spec lacks an input the recipe
+/// needs, as a spec written before those fields existed does, or the RDKit bridge spec, which is built
+/// for comparison and never embedded; `bb_spec::build_native` supplies both.
+#[derive(Debug, thiserror::Error)]
+pub enum RecipeError {
+    /// `core_seeds` or `sidechain_confs` is 0, so there is no recipe to run.
+    #[error("the spec has no core-pin recipe (core_seeds {core_seeds}, sidechain_confs {sidechain_confs})")]
+    NoRecipeCounts { core_seeds: u32, sidechain_confs: u32 },
+    /// `raw_bounds_f64` is empty: the pre-smoothing bounds that RDKit's coordMap path tightens to a
+    /// core's pins.
+    #[error("the spec has no raw bounds matrix for the core-pin recipe to tighten")]
+    NoRawBounds,
+    #[error(transparent)]
+    Shortfall(#[from] Shortfall),
+}
+
 /// Initialization for the 4D Stage-A embed, matching RDKit's `useRandomCoords`.
 #[derive(Clone, Copy, PartialEq)]
 pub enum InitMode {
@@ -47,12 +86,9 @@ pub enum InitMode {
 }
 
 /// Generate one accepted conformer (3D, `n_atoms*3`): retry [`embed_attempt`] with fresh inits
-/// until it passes [`checks::passes_checks`]. The attempt budget is `(10 × n_atoms).clamp(1, 24)`.
-/// NOTE: RDKit's embedder uses `maxIterations = 10 * numAtoms` uncapped (`Embedder.cpp`), so for
-/// n ≥ 3 native gives up sooner. Whether the 24 cap matches Divya's actual yield (the oracle — she
-/// may set `maxIterations`) is a stochastic-layer question that can only be settled by the
-/// end-to-end ensemble/yield comparison vs Divya, not per-unit vs RDKit; it is intentionally left at
-/// the calibrated cap until that comparison is run. If none pass, the last attempt is returned.
+/// until it passes [`checks::passes_checks`]. The attempt budget is RDKit's: `maxIterations = 0`,
+/// which `build_ligands.py` leaves at its default, means `10 × numAtoms` (`Embedder.cpp`,
+/// `embedPoints`). `None` if no attempt passes, as RDKit then yields no conformer.
 ///
 /// `pinned` is empty (free embed) or length `n_atoms`; `Some(xyz)` holds that atom at `xyz`
 /// throughout.
@@ -61,24 +97,18 @@ fn embed_one(
     rng: &mut StdRng,
     pinned: &[Option<[f64; 3]>],
     init_mode: InitMode,
-) -> Vec<f64> {
-    let max_attempts = (10 * spec.n_atoms).clamp(1, 24);
-    let mut last = Vec::new();
+) -> Option<Vec<f64>> {
+    let max_attempts = 10 * spec.n_atoms;
     for _ in 0..max_attempts {
         // `None` = a rejected attempt (init-level eigenvalue reject or the per-atom energy reject);
         // RDKit re-draws a fresh distance matrix on either, which the next loop iteration does.
         if let Some(c) = embed_attempt(spec, rng, pinned, init_mode) {
             if checks::passes_checks(spec, &c, pinned) {
-                return c;
+                return Some(c);
             }
-            last = c;
         }
     }
-    // Budget exhausted with nothing accepted: return the last completed (unaccepted) attempt, or an
-    // empty conformer if every attempt was rejected (RDKit likewise yields no conformer here — the
-    // ensemble consumers skip a conformer whose length != n*3). The 24-cap vs RDKit's uncapped 10·n
-    // is a yield-calibration question for the Phase-3 ensemble comparison vs Divya.
-    last
+    None
 }
 
 /// One embedding attempt (init → Stage A → Stage B → Stage C). Returns `None` on RDKit's embed-loop
@@ -148,79 +178,121 @@ fn embed_attempt(
 }
 
 /// Embed `n_conf` independent conformers for `spec` from a single RNG seeded by `seed`. No
-/// core-pinning; metric-matrix init.
-pub fn embed(spec: &MoleculeSpec, n_conf: usize, seed: u64) -> Vec<Conformer> {
+/// core-pinning; metric-matrix init. A conformer that cannot be embedded is drawn again from the
+/// same RNG, up to [`MAX_TRIES_PER_REQUEST`]` × n_conf` draws in all; past that the input is taken as
+/// unembeddable and the result is a [`Shortfall`].
+pub fn embed(spec: &MoleculeSpec, n_conf: usize, seed: u64) -> Result<Vec<Conformer>, Shortfall> {
     let mut rng = StdRng::seed_from_u64(seed);
-    (0..n_conf)
-        .map(|_| Conformer {
-            coords: embed_one(spec, &mut rng, &[], InitMode::MetricMatrix),
-        })
-        .collect()
-}
-
-/// RNG seed for the conformer at core seed `j`, sidechain index `k`, derived from `base`.
-#[inline]
-fn mix_seed(base: u64, j: u64, k: u64) -> u64 {
-    base ^ (j.wrapping_add(1)).wrapping_mul(0x9E3779B97F4A7C15)
-        ^ (k.wrapping_add(1)).wrapping_mul(0xC2B2AE3D27D4EB4F)
-}
-
-/// The two-stage core-pin recipe. For each of `spec.core_seeds` seeds `j`: embed one free conformer
-/// (metric-matrix init, RNG seed `base_seed + j`), hold `spec.pin_atoms` at those coordinates and
-/// tighten the bounds from them ([`bounds::coord_map_bounds_f64`]), then embed `spec.sidechain_confs`
-/// conformers (random init, one RNG seed per conformer) around the held core. Returns
-/// `core_seeds × sidechain_confs` conformers, generated in parallel over rayon.
-///
-/// Falls back to 200 independent [`embed`] conformers when `core_seeds` or `sidechain_confs` is 0.
-pub fn embed_recipe(spec: &MoleculeSpec, base_seed: u64) -> Vec<Conformer> {
-    if spec.core_seeds == 0 || spec.sidechain_confs == 0 {
-        return embed(spec, 200, base_seed);
+    let mut conformers = Vec::with_capacity(n_conf);
+    let mut draws_left = MAX_TRIES_PER_REQUEST * n_conf;
+    while conformers.len() < n_conf && draws_left > 0 {
+        draws_left -= 1;
+        if let Some(coords) = embed_one(spec, &mut rng, &[], InitMode::MetricMatrix) {
+            conformers.push(Conformer { coords });
+        }
     }
+    if conformers.len() == n_conf {
+        Ok(conformers)
+    } else {
+        Err(Shortfall { requested: n_conf, embedded: conformers.len() })
+    }
+}
+
+/// RNG seed of the recipe's core `j`, derived from `base`.
+#[inline]
+fn core_seed(base: u64, j: usize) -> u64 {
+    base.wrapping_add(j as u64)
+}
+
+/// RNG seed of sidechain conformer `k` around core `j`, derived from `base`.
+#[inline]
+fn mix_seed(base: u64, j: usize, k: usize) -> u64 {
+    base ^ (j as u64).wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ (k as u64).wrapping_add(1).wrapping_mul(0xC2B2AE3D27D4EB4F)
+}
+
+/// The recipe's core `j` for `base_seed`: one free conformer (metric-matrix init, nothing pinned), or
+/// `None` if it cannot be embedded. [`embed_recipe`] builds block `s` around core `s`, and a
+/// replacement block around the next unused core.
+pub fn recipe_core(spec: &MoleculeSpec, base_seed: u64, j: usize) -> Option<Conformer> {
+    let mut rng = StdRng::seed_from_u64(core_seed(base_seed, j));
+    embed_one(spec, &mut rng, &[], InitMode::MetricMatrix).map(|coords| Conformer { coords })
+}
+
+/// [`embed_recipe`]'s block on core `j`, its `n_side` sidechains embedded in parallel. `None` if the
+/// core or any of its sidechains cannot be embedded; the block's remaining sidechains are then skipped.
+fn core_block(spec: &MoleculeSpec, base_seed: u64, j: usize, n_side: usize) -> Option<Block> {
     let n = spec.n_atoms;
+    let core = recipe_core(spec, base_seed, j)?;
+    let mut pinned = vec![None; n];
+    for &a in &spec.pin_atoms {
+        pinned[a as usize] = Some(core.atom(a as usize));
+    }
+    // Tighten the RAW bounds (f64, matching RDKit's coordMap path which starts pre-smoothing) with
+    // the pinned distances; the sidechain embed reads bounds_f64 via ub64. `with_seed_bounds` shares
+    // the topology and skips cloning the two raw-bounds matrices the sidechain embed never reads.
+    let sc_spec = spec.with_seed_bounds(bounds::coord_map_bounds_f64(&spec.raw_bounds_f64, n, &pinned));
+    let conformers = (0..n_side)
+        .into_par_iter()
+        .map(|k| {
+            let mut rng = StdRng::seed_from_u64(mix_seed(base_seed, j, k));
+            embed_one(&sc_spec, &mut rng, &pinned, InitMode::Random).map(|coords| Conformer { coords })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Block { core: j, conformers })
+}
+
+/// The two-stage core-pin recipe: `spec.core_seeds` blocks of `spec.sidechain_confs` conformers, in
+/// block order, generated in parallel over rayon. Block `s` is built on core `s` ([`recipe_core`]):
+/// `spec.pin_atoms` are held at that core's coordinates, the raw bounds are tightened to them
+/// ([`bounds::coord_map_bounds_f64`]), and the sidechain conformers are embedded around the held core
+/// (random init, one RNG seed per conformer).
+///
+/// Returns exactly `core_seeds` complete blocks, every conformer accepted. A block that cannot be
+/// completed (its core, or a sidechain around it, fails to embed) is rebuilt around the next unused
+/// core, `core_seeds`, `core_seeds + 1`, …, up to [`MAX_TRIES_PER_REQUEST`]` × core_seeds` cores in
+/// all; past that the input is taken as unembeddable and the result is a [`Shortfall`]. This departs
+/// from `build_ligands.py`, which leaves a failed core's conformers out.
+pub fn embed_recipe(spec: &MoleculeSpec, base_seed: u64) -> Result<Vec<Block>, RecipeError> {
+    if spec.core_seeds == 0 || spec.sidechain_confs == 0 {
+        return Err(RecipeError::NoRecipeCounts {
+            core_seeds: spec.core_seeds,
+            sidechain_confs: spec.sidechain_confs,
+        });
+    }
+    if spec.raw_bounds_f64.is_empty() {
+        return Err(RecipeError::NoRawBounds);
+    }
     let (n_seed, n_side) = (spec.core_seeds as usize, spec.sidechain_confs as usize);
 
-    // Phase 1: core seed conformers — independent per j, embedded in parallel.
-    let seed_coords: Vec<Vec<f64>> = (0..n_seed)
-        .into_par_iter()
-        .map(|j| {
-            let mut rng = StdRng::seed_from_u64(base_seed + j as u64);
-            embed_one(spec, &mut rng, &[], InitMode::MetricMatrix)
-        })
-        .collect();
-
-    // Phase 2: per-seed setup — freeze the pin set + coordMap-tighten the bounds (serial, ~cheap).
-    let per_seed: Vec<(Vec<Option<[f64; 3]>>, MoleculeSpec)> = seed_coords
-        .iter()
-        .map(|sc| {
-            let mut pinned = vec![None; n];
-            for &a in &spec.pin_atoms {
-                let a = a as usize;
-                pinned[a] = Some([sc[a * 3], sc[a * 3 + 1], sc[a * 3 + 2]]);
+    let mut blocks: Vec<Option<Block>> = vec![None; n_seed];
+    let mut core_of: Vec<usize> = (0..n_seed).collect();
+    let mut next_core = n_seed;
+    let mut pending: Vec<usize> = (0..n_seed).collect();
+    while !pending.is_empty() {
+        let built: Vec<Option<Block>> = pending
+            .par_iter()
+            .map(|&s| core_block(spec, base_seed, core_of[s], n_side))
+            .collect();
+        let mut retry = Vec::new();
+        for (s, block) in pending.into_iter().zip(built) {
+            if block.is_some() {
+                blocks[s] = block;
+            } else if next_core < MAX_TRIES_PER_REQUEST * n_seed {
+                core_of[s] = next_core;
+                next_core += 1;
+                retry.push(s);
             }
-            // Tighten the RAW bounds (f64, matching RDKit's coordMap path which starts pre-smoothing)
-            // with the pinned distances; the sidechain embed reads bounds_f64 via ub64. Fall back to
-            // the smoothed bounds for pre-field specs. `with_seed_bounds` shares the topology and skips
-            // cloning the two raw-bounds matrices the sidechain embed never reads.
-            let base = if spec.raw_bounds_f64.is_empty() { &spec.bounds_f64 } else { &spec.raw_bounds_f64 };
-            let sc_spec = spec.with_seed_bounds(bounds::coord_map_bounds_f64(base, n, &pinned));
-            (pinned, sc_spec)
-        })
-        .collect();
+        }
+        pending = retry;
+    }
 
-    // Phase 3: all sidechain conformers as one flat parallel task pool (best load balancing).
-    let tasks: Vec<(usize, usize)> = (0..n_seed)
-        .flat_map(|j| (0..n_side).map(move |k| (j, k)))
-        .collect();
-    tasks
-        .into_par_iter()
-        .map(|(j, k)| {
-            let (pinned, sc_spec) = &per_seed[j];
-            let mut rng = StdRng::seed_from_u64(mix_seed(base_seed, j as u64, k as u64));
-            Conformer {
-                coords: embed_one(sc_spec, &mut rng, pinned, InitMode::Random),
-            }
-        })
-        .collect()
+    let built: Vec<Block> = blocks.into_iter().flatten().collect();
+    if built.len() == n_seed {
+        Ok(built)
+    } else {
+        Err(Shortfall { requested: n_seed * n_side, embedded: built.len() * n_side }.into())
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +316,7 @@ mod tests {
             bounds,
             ..Default::default()
         };
-        let confs = embed(&spec, 3, 42);
+        let confs = embed(&spec, 3, 42).expect("a realisable 6-atom spec embeds");
         assert_eq!(confs.len(), 3);
         for c in &confs {
             assert_eq!(c.coords.len(), n * 3);

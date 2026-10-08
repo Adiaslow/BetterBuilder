@@ -25,9 +25,20 @@ fn main() {
     let threads = rayon::current_num_threads();
     let t = Instant::now();
     // Molecule-level parallelism; embed_recipe also parallelizes internally (one shared rayon pool).
-    let confs: usize = specs
+    // A spec that cannot be embedded in full is named on stderr; the conformers it did embed count.
+    let confs: usize = paths
         .par_iter()
-        .map(|s| bb_embed::embed_recipe(s, 210185).len())
+        .zip(&specs)
+        .map(|(path, s)| match bb_embed::embed_recipe(s, 210185) {
+            Ok(blocks) => blocks.iter().map(|b| b.conformers.len()).sum(),
+            Err(e) => {
+                eprintln!("bb-batch: {path}: {e}");
+                match e {
+                    bb_embed::RecipeError::Shortfall(shortfall) => shortfall.embedded,
+                    _ => 0,
+                }
+            }
+        })
         .sum();
     let dt = t.elapsed().as_secs_f64();
 

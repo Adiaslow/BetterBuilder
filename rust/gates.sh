@@ -7,7 +7,7 @@
 #   rust/gates.sh certify         # prove our from-source build == her container build (byte-identical)
 #   rust/gates.sh live seeds_100.smi   # live RDKit-parity gates on a chosen corpus
 #   rust/gates.sh hunt            # divergence-hunt: generate adversarial macrocycles, diff native vs bridge
-#   rust/gates.sh dbgate          # db2 writer corpus gate: native per-block db2 == her mol2db2 (byte-identical)
+#   rust/gates.sh dbgate          # db2 writer corpus gate: native per-block db2 == her mol2db2 (byte-identical); full pipeline with AMSOL
 #   rust/gates.sh bench           # speed gate: each pure-Rust component beats the C++ RDKit floor (equal work)
 #
 # Sources the committed toolchain env (toolchain/env.sh) — never a scratch copy. A red gate aborts
@@ -99,7 +99,7 @@ run_live() {
   cargo test -p bb-rdkit --test ff_parity
   cargo test -p bb-rdkit --test embed_checks_parity
   cargo test -p bb-rdkit --test coord_map_bounds_parity
-  BB_PARITY_CORPUS="$CORPUS" cargo test -p bb-rdkit --test corpus_parity -- --nocapture
+  BB_PARITY_CORPUS="$CORPUS" cargo test -p bb-rdkit --test corpus_parity -- --ignored --nocapture
 }
 
 # --- Hunt tier (CONFORMANCE.md Phase 2): divergence-hunt the deterministic layers. Generate adversarial
@@ -116,7 +116,7 @@ run_hunt() {
   # embed layer: point the vetted corpus gate at a bounded subset of the generated corpus (host toolchain).
   head -"${BB_HUNT_EMBED_N:-500}" "$GEN" > "$H/generated_embed.smi"
   ( . "$REPO/toolchain/env.sh"
-    BB_PARITY_CORPUS="$H/generated_embed.smi" cargo test --release -p bb-rdkit --test corpus_parity -- --nocapture ) || exit 1
+    BB_PARITY_CORPUS="$H/generated_embed.smi" cargo test --release -p bb-rdkit --test corpus_parity -- --ignored --nocapture ) || exit 1
 }
 
 
@@ -125,6 +125,8 @@ run_hunt() {
 run_dbgate() {
   echo "== db2 writer corpus gate: native per-block db2 == her mol2db2 (byte-identical modulo SMILES metadata) =="
   python3 "$REPO/validation/db2/corpus_writer_gate.py" "$REPO/validation/seeds_100.smi" "${BB_DBGATE_N:-30}"
+  # the full pipeline with real AMSOL charges (ignored by default — it needs AMSOL, as this tier does)
+  cargo test -p bb-output --test full_pipeline -- --ignored
 }
 
 # --- Bench tier: the SPEED gate. `run.sh` times each pure-Rust component against C++ RDKit doing the

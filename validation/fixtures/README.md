@@ -26,11 +26,28 @@ Consumed by `bb-embed/tests/parity_goldens.rs` (no RDKit toolchain). The committ
 `seeds_100`; the full `seeds_5000` authority stays a **live** `gates.sh --verify` pass that
 regenerates and byte-diffs these files, so they cannot silently rot and a version bump is caught.
 
-## `divya/` — embed-ensemble + output goldens (her seeded pipeline) — TODO
+## `zinc22/` — ZINC-22 id → 3D-database directory (the ZINC maintainers' code)
 
-The authoritative oracle. To be generated from `build_ligands.py` with her seeds (`randomSeed =
-210185 + j`) via her container, and compared **distributionally** (RMSD/TFD) because native's
-RNG/eigensolver/minimizer differ from hers, so identical seeds do not give identical conformers.
-Note: her solvation embed (`build_ligands.py` ~line 191) appears **unseeded**, so its charge branch
-is reproducible only as a one-sample capture, not "deterministic given seeds" — verify per-stage
-seeding when generating this tier. (The previous `validation/reference/*.sdf` were stale and removed.)
+`tranche_dirs.tsv` — `tranche, sub_id, zinc_id, directory`: ZINC-22 ids produced by the maintainers' own
+encoder and the directory their own `get_zinc_directory_hash` files each under. Covers every tranche in
+their list of real 3D tranches plus every logP bin at heavy-atom counts 0, 1, 29, 30 and 61. Generated
+**only** by running their code at pinned commits (the URLs are in the file's header):
+
+```
+python3 validation/fixtures/zinc22/gen_tranche_dirs.py > validation/fixtures/zinc22/tranche_dirs.tsv
+```
+
+Consumed by `bb-output`'s `zinc22` tests. Legacy ids (`ZINC00…`, ZINC-20 and earlier) are not in it:
+the ZINC-22 numbering defines them as carrying no tranche, which their directory function does not
+honour, so those cases are tested against that definition instead.
+
+## `divya/` — her seeded conformer ensembles
+
+`divya/gen_reference.py` regenerates her seeded ensembles (`randomSeed = 210185 + j`) with a verbatim
+replica of the ensemble block of `build_ligands.py`; see [`divya/README.md`](divya/README.md). The
+ensembles are byte-deterministic and large, so they are regenerated on demand into the gitignored
+`divya/ensembles/` and never committed. They are compared **distributionally** (RMSD/TFD), because
+native's RNG/eigensolver/minimizer differ from hers, so identical seeds do not give identical
+conformers. Her solvation embed (`build_ligands.py:191`) is **unseeded**, so its charge branch is
+reproducible only as a one-sample capture, not "deterministic given seeds". (The previous
+`validation/reference/*.sdf` were stale and removed.)

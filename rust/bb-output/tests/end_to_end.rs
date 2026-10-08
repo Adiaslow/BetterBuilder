@@ -74,9 +74,9 @@ fn smiles_to_tarball() {
 
         // assemble the tarball and verify both members extract
         let bytes = bb_output::write_tarball(&[bb_output::Ligand {
-            name: name.split('.').next().unwrap().to_string(),
+            name: bb_output::MoleculeName::new(name.split('.').next().unwrap()).unwrap(),
             prot_id: 0,
-            formal_charge: 0,
+            charge: bb_output::tarball::ChargeLetter::new(0).unwrap(),
             mol2: mol2.clone(),
             db2: db2.clone(),
         }])

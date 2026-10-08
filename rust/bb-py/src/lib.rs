@@ -9,7 +9,7 @@
 //! result.conformers[0]    # flat [x0, y0, z0, x1, …] for conformer 0
 //! ```
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 /// A conformer ensemble for one molecule. Immutable; indexable/len over its conformers.
@@ -40,15 +40,16 @@ impl Conformers {
 /// Embed a SMILES into a conformer ensemble via the ETKDG two-stage core-pin recipe. The conformer
 /// count comes from the recipe counts in the spec, not from a caller argument.
 ///
-/// Raises `ValueError` if the SMILES cannot be parsed.
+/// Raises `ValueError` if the SMILES cannot be parsed, and `RuntimeError` if the recipe's full
+/// conformer count cannot be embedded.
 #[pyfunction]
 #[pyo3(signature = (smiles, seed = 210185))]
 fn embed(smiles: &str, seed: u64) -> PyResult<Conformers> {
     let spec = bb_spec::build_native(smiles).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let confs = bb_embed::embed_recipe(&spec, seed);
+    let blocks = bb_embed::embed_recipe(&spec, seed).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(Conformers {
         n_atoms: spec.n_atoms,
-        conformers: confs.into_iter().map(|c| c.coords).collect(),
+        conformers: blocks.into_iter().flat_map(|b| b.conformers).map(|c| c.coords).collect(),
     })
 }
 

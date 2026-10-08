@@ -35,18 +35,18 @@ pub fn find_chiral_sets(mol: &Perceived) -> (Vec<ChiralSet>, Vec<ChiralSet>) {
 
     let mut chiral = Vec::new();
     let mut tetra = Vec::new();
-    for x in 0..n {
+    for (x, neighbours) in adj.iter().enumerate() {
         if mol.atomic_numbers[x] == 1 {
             continue; // skip hydrogens
         }
         let tag = mol.chiral_tags[x];
         let z = mol.atomic_numbers[x];
-        let degree = adj[x].len();
+        let degree = neighbours.len();
         let tagged = matches!(tag, ChiralTag::Cw | ChiralTag::Ccw);
         if !(tagged || ((z == 6 || z == 7) && degree == 4)) {
             continue;
         }
-        let mut nbrs = adj[x].clone();
+        let mut nbrs = neighbours.clone();
         let vol_lower = if nbrs.len() < 4 {
             nbrs.push(x); // include the center as the fourth point
             2.0f32

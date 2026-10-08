@@ -28,10 +28,8 @@ fn main() {
         // conf-gen (perceive + spec + embed 200) — comparable to her `rdkit_conf_gen`
         let e0 = Instant::now();
         let (spec, p) = bb_spec::build_native_perceived(smiles).expect("spec");
-        let raw = bb_embed::embed_recipe(&spec, 0x0BADC0DE);
-        let confs: Vec<Vec<[f64; 3]>> = raw.iter()
-            .map(|c| (0..spec.n_atoms).map(|i| [c.coords[3*i], c.coords[3*i+1], c.coords[3*i+2]]).collect())
-            .collect();
+        let blocks = bb_embed::embed_recipe(&spec, 0x0BADC0DE).expect("embed");
+        let confs = bb_output::assemble::confs_from_blocks(&blocks, spec.n_atoms);
         let e_embed = e0.elapsed().as_secs_f64();
 
         // typing + strain (assemble) — comparable to her SYBYL typing + `strain`
@@ -39,12 +37,13 @@ fn main() {
         let mol = bb_output::assemble::assemble(name, smiles, &p, confs);
         let e_asm = a0.elapsed().as_secs_f64();
 
-        // serialize both members (mol2 + db2) — comparable to her `db2`
+        // serialize both members (mol2 + per-block db2, as production does) — comparable to her `db2`
         let n = mol.atom_num.len();
         let solv = solv0(n);
         let s0 = Instant::now();
         let _mol2 = bb_output::write_mol2(&mol, &vec![0.0; n], 0);
-        let _db2 = bb_db2::write_entry(&bb_output::build(&mol, &solv).expect("db2"));
+        let block_lens = bb_output::assemble::block_lens(&blocks);
+        let _db2 = bb_output::assemble::build_blocks_db2(&mol, &solv, &block_lens).expect("db2");
         let e_ser = s0.elapsed().as_secs_f64();
 
         te += e_embed; ta += e_asm; ts += e_ser;

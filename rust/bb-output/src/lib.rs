@@ -2,13 +2,13 @@
 //!
 //! The deliverable is the tarball DOCK consumes: a charge-bearing mol2 and a `.db2`. Both are
 //! serializations of the *same* [`mol::TypedMol`] (atoms + SYBYL types, bonds, conformations) plus its
-//! `.solv` — we never derive one from the other. This crate builds the db2 side today: [`build`]
-//! assembles a [`bb_db2::Db2Entry`] (which [`bb_db2`] serializes to the exact db2 bytes) by typing
-//! every atom ([`sybyl2dock`], [`color`]) and constructing the conformer [`hierarchy`]. The molecule
+//! `.solv` — we never derive one from the other. [`build`] assembles a [`bb_db2::Db2Entry`] (which
+//! [`bb_db2`] serializes to the exact db2 bytes) by typing every atom ([`sybyl2dock`], [`color`]) and
+//! constructing the conformer [`hierarchy`]; [`write_mol2`] writes the mol2; [`assemble`] runs the
+//! pipeline from SMILES to both; [`tarball`] packs them under each molecule's [`name`]. The molecule
 //! comes from BetterBuilder's own pipeline in production; the gate feeds an identical one from the
 //! container's authoritative parse, so the output is checked byte-for-byte against the pipeline's own
-//! db2 builder (and per-stage against its `hierarchy.Hierarchy` internals). The input-mol2 writer is
-//! the remaining output; it will serialize the same `TypedMol`.
+//! db2 builder (and per-stage against its `hierarchy.Hierarchy` internals).
 
 pub mod assemble;
 pub mod buckets;
@@ -17,13 +17,16 @@ pub mod color;
 pub mod hierarchy;
 pub mod mol;
 pub mod mol2_out;
+pub mod name;
 pub mod solvation;
 pub mod sybyl;
 pub mod sybyl2dock;
 pub mod tarball;
 pub mod unionfind;
+pub mod zinc22;
 
 pub use mol2_out::{write_mol2, write_mol2_all};
+pub use name::MoleculeName;
 pub use tarball::{write_tarball, Ligand};
 
 use bb_db2::model::{Atom, Bond, Conf, Coord, Db2Entry, Rigid, Set};

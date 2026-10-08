@@ -1,5 +1,6 @@
 [package]
 name = "bb-db2"
+description = "The DOCK .db2 conformer-hierarchy format: data model, parser, and byte-exact writer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

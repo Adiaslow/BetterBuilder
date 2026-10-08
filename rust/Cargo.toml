@@ -14,7 +14,9 @@ publish = false # internal lab tool, not for crates.io
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: parse floats correctly rounded, so a MoleculeSpec survives its JSON round trip
+# exactly (the default parser can be 1 ULP off, enough to change an embed).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 # Shared lints — deny the sharp edges, keep the hot numeric path pragmatic.
 [workspace.lints.clippy]

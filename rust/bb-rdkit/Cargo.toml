@@ -1,6 +1,6 @@
 [package]
 name = "bb-rdkit"
-description = "Setup layer: extracts a MoleculeSpec (bounds matrix, experimental torsions, chiral sets, impropers) from a SMILES via cxx FFI to the patched RDKit C++ build. This is the ~9% of the pipeline borrowed from RDKit; the embed itself is bb-embed."
+description = "Bridge to the patched RDKit C++ (cxx FFI): extracts a MoleculeSpec and exposes RDKit's own computations for the parity gates and fixture generation. Not in the production pipeline."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

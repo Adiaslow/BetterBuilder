@@ -169,17 +169,13 @@ fn add_charge_flags(
             5 => key.push_str("+5"),
             _ => key.push_str("+5"), // tolerate fallback
         },
-        16 => {
-            // S: only when not SP2
-            if hyb != Hybridization::Sp2 {
-                match tv {
-                    2 => key.push_str("+2"),
-                    4 => key.push_str("+4"),
-                    6 => key.push_str("+6"),
-                    _ => key.push_str("+6"), // tolerate fallback
-                }
-            }
-        }
+        // S: only when not SP2
+        16 if hyb != Hybridization::Sp2 => match tv {
+            2 => key.push_str("+2"),
+            4 => key.push_str("+4"),
+            6 => key.push_str("+6"),
+            _ => key.push_str("+6"), // tolerate fallback
+        },
         30 | 48 | 34 | 52 | 80 | 84 => key.push_str("+2"), // Zn, Cd, Se, Te, Hg, Po
         31 | 33 | 49 | 51 | 81 | 82 | 83 => key.push_str("+3"), // Ga, As, In, Sb, Tl, Pb, Bi
         75 => {
